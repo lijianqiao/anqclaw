@@ -1,4 +1,5 @@
 mod config;
+mod memory;
 mod types;
 
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};

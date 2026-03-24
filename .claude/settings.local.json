@@ -21,7 +21,8 @@
       "Bash(ANQ_LLM_API_KEY=test ANQ_FEISHU_APP_SECRET=test cargo run)",
       "Bash(git add:*)",
       "Bash(git commit -m \"feat: initialize tracing-subscriber with JSON output:*)",
-      "Bash(ANQ_LLM_API_KEY=test ANQ_FEISHU_APP_SECRET=test RUST_LOG=debug cargo run)"
+      "Bash(ANQ_LLM_API_KEY=test ANQ_FEISHU_APP_SECRET=test RUST_LOG=debug cargo run)",
+      "Bash(cargo test:*)"
     ]
   }
 }

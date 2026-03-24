@@ -44,7 +44,7 @@
 
 ### Task 1.1: 更新 Cargo.toml 依赖
 
-- [ ] **Step 1: 写入完整依赖**
+- [x] **Step 1: 写入完整依赖**
 
 ```toml
 [package]
@@ -73,21 +73,14 @@ lru = "0.13"
 futures = "0.3"
 ```
 
-- [ ] **Step 2: 运行 `cargo check` 确认依赖解析成功**
+- [x] **Step 2: 运行 `cargo check` 确认依赖解析成功**
 
 Run: `cd agent && cargo check`
 Expected: 编译通过（可能有 unused import 警告，正常）
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add Cargo.toml Cargo.lock
-git commit -m "chore: add all v1 dependencies"
-```
-
 ### Task 1.2: 创建公共类型 types.rs
 
-- [ ] **Step 1: 创建 `src/types.rs`**
+- [x] **Step 1: 创建 `src/types.rs`**
 
 实现以下类型（全部需要 `derive(Debug, Clone)` 和必要的 `Serialize/Deserialize`）：
 - `InboundMessage` + `InboundMessage::heartbeat()` 构造
@@ -100,21 +93,14 @@ git commit -m "chore: add all v1 dependencies"
 
 参考设计规格书 §3 和 §4 中的类型定义。
 
-- [ ] **Step 2: 在 `main.rs` 中 `mod types;` 引入，运行 `cargo check`**
+- [x] **Step 2: 在 `main.rs` 中 `mod types;` 引入，运行 `cargo check`**
 
 Run: `cargo check`
 Expected: 编译通过
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/types.rs src/main.rs
-git commit -m "feat: add core types - InboundMessage, ChatMessage, LlmResponse, etc."
-```
-
 ### Task 1.3: 创建配置模块 config.rs
 
-- [ ] **Step 1: 创建 `src/config.rs`**
+- [x] **Step 1: 创建 `src/config.rs`**
 
 实现 `AppConfig` 及各子结构体（全部 `#[derive(Deserialize)]`）：
 - `AppSection`: name, workspace, log_level
@@ -132,11 +118,11 @@ git commit -m "feat: add core types - InboundMessage, ChatMessage, LlmResponse, 
 - 同时支持直接在 TOML 中写明文值（开发/测试环境使用）
 - 需要覆盖的字段：`llm.api_key` → `ANQ_LLM_API_KEY`，`feishu.app_secret` → `ANQ_FEISHU_APP_SECRET`
 
-- [ ] **Step 2: 创建 `config.toml` 示例配置文件**
+- [x] **Step 2: 创建 `config.toml` 示例配置文件**
 
 包含所有 section 和注释说明（参考设计规格书 §11）。
 
-- [ ] **Step 3: 在 `main.rs` 中加载配置并打印确认**
+- [x] **Step 3: 在 `main.rs` 中加载配置并打印确认**
 
 ```rust
 mod config;
@@ -150,34 +136,33 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-- [ ] **Step 4: 运行 `cargo run` 确认配置加载成功**
+- [x] **Step 4: 运行 `cargo run` 确认配置加载成功**
 
 Run: `cargo run`
 Expected: 输出 "Loaded config: anq-agent"
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/config.rs config.toml src/main.rs
-git commit -m "feat: add TOML config loading with defaults and env var override"
-```
-
 ### Task 1.4: 初始化 tracing 日志
 
-- [ ] **Step 1: 在 `main.rs` 中初始化 tracing-subscriber**
+- [x] **Step 1: 在 `main.rs` 中初始化 tracing-subscriber**
 
 根据 `config.app.log_level` 初始化 `EnvFilter`，设置 JSON 格式输出到 stderr。
 
-- [ ] **Step 2: 验证日志输出**
+- [x] **Step 2: 验证日志输出**
 
 Run: `cargo run`
 Expected: 能看到 tracing 初始化日志
 
-- [ ] **Step 3: Commit**
+### ✅ Phase 1 验收
 
-```bash
-git add src/main.rs
-git commit -m "feat: init tracing subscriber with configurable log level"
+- [x] `cargo build --release` 通过
+- [x] `cargo clippy` 无 warning
+- [x] 更新进度文档
+
+**Commit 示例：**
+```
+feat(phase1): project scaffold, config loading and core types
+
+Phase 1 - 项目脚手架、配置加载与公共类型
 ```
 
 ---
@@ -209,13 +194,6 @@ CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages(chat_id, created_a
 CREATE VIRTUAL TABLE IF NOT EXISTS memories USING fts5(
     key, content, tags, created_at UNINDEXED
 );
-```
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add src/memory/schema.sql
-git commit -m "feat: add SQLite schema for messages and memories tables"
 ```
 
 ### Task 2.2: 实现 MemoryStore
@@ -250,11 +228,18 @@ Expected: 编译通过
 Run: `cargo test memory`
 Expected: 3 个测试全部通过
 
-- [ ] **Step 5: Commit**
+### ✅ Phase 2 验收
 
-```bash
-git add src/memory/
-git commit -m "feat: implement MemoryStore with SQLite - history CRUD and FTS5 memory search"
+- [ ] `cargo build --release` 通过
+- [ ] `cargo test memory` 全部通过
+- [ ] `cargo clippy` 无 warning
+- [ ] 更新进度文档
+
+**Commit 示例：**
+```
+feat(phase2): SQLite memory store with FTS5 history and long-term memory
+
+Phase 2 - SQLite 持久化存储，含对话历史 CRUD 与 FTS5 长期记忆搜索
 ```
 
 ---
@@ -272,19 +257,7 @@ git commit -m "feat: implement MemoryStore with SQLite - history CRUD and FTS5 m
 
 - [ ] **Step 1: 创建 `src/llm/mod.rs`**
 
-定义 `LlmClient` trait（参考设计规格书 §4）：
-
-```rust
-pub trait LlmClient: Send + Sync {
-    fn chat(
-        &self,
-        messages: &[ChatMessage],
-        tools: &[ToolDefinition],
-    ) -> impl Future<Output = Result<LlmResponse>> + Send;
-}
-```
-
-注意：由于需要 `dyn LlmClient`（在 AgentCore 中使用 `Arc<dyn LlmClient>`），需要手动实现 object-safe 版本。使用 `Box<dyn Future>` 方式：
+定义 `LlmClient` trait（object-safe，使用 `Pin<Box<dyn Future>>`）：
 
 ```rust
 pub trait LlmClient: Send + Sync {
@@ -299,13 +272,6 @@ pub trait LlmClient: Send + Sync {
 导出 `pub mod anthropic;` 和 `pub mod openai_compat;`。
 
 - [ ] **Step 2: 运行 `cargo check`**
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/llm/mod.rs
-git commit -m "feat: define LlmClient trait with object-safe async interface"
-```
 
 ### Task 3.2: 实现 OpenAI-compatible Client
 
@@ -323,13 +289,6 @@ git commit -m "feat: define LlmClient trait with object-safe async interface"
 内部请求/响应类型用私有结构体定义，不暴露到模块外。
 
 - [ ] **Step 2: 运行 `cargo check`**
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/llm/openai_compat.rs
-git commit -m "feat: implement OpenAI-compatible LLM client with retry logic"
-```
 
 ### Task 3.3: 实现 Anthropic Client
 
@@ -349,13 +308,6 @@ git commit -m "feat: implement OpenAI-compatible LLM client with retry logic"
 
 - [ ] **Step 2: 运行 `cargo check`**
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/llm/anthropic.rs
-git commit -m "feat: implement Anthropic Claude API client with content block mapping"
-```
-
 ### Task 3.4: LLM Client 工厂函数
 
 - [ ] **Step 1: 在 `src/llm/mod.rs` 添加工厂函数**
@@ -372,11 +324,17 @@ pub fn create_llm_client(config: &LlmSection) -> Arc<dyn LlmClient> {
 
 - [ ] **Step 2: 运行 `cargo check`**
 
-- [ ] **Step 3: Commit**
+### ✅ Phase 3 验收
 
-```bash
-git add src/llm/mod.rs
-git commit -m "feat: add LLM client factory function for provider selection"
+- [ ] `cargo build --release` 通过
+- [ ] `cargo clippy` 无 warning
+- [ ] 更新进度文档
+
+**Commit 示例：**
+```
+feat(phase3): LLM abstraction layer with Anthropic and OpenAI-compatible clients
+
+Phase 3 - LLM 抽象层，实现 Anthropic 与 OpenAI 兼容双端 Client
 ```
 
 ---
@@ -404,13 +362,6 @@ git commit -m "feat: add LLM client factory function for provider selection"
 
 - [ ] **Step 2: 运行 `cargo check`**
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/tool/mod.rs
-git commit -m "feat: define Tool trait and ToolRegistry with concurrent batch execution"
-```
-
 ### Task 4.2: shell_exec 工具
 
 - [ ] **Step 1: 创建 `src/tool/shell.rs`**
@@ -436,13 +387,6 @@ git commit -m "feat: define Tool trait and ToolRegistry with concurrent batch ex
 Run: `cargo test shell`
 Expected: 通过
 
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/tool/shell.rs
-git commit -m "feat: implement shell_exec tool with command whitelist and timeout"
-```
-
 ### Task 4.3: web_fetch 工具
 
 - [ ] **Step 1: 创建 `src/tool/web.rs`**
@@ -457,13 +401,6 @@ git commit -m "feat: implement shell_exec tool with command whitelist and timeou
   5. 简单 strip HTML 标签（正则 `<[^>]+>` 替换为空）
 
 - [ ] **Step 2: 编写测试**（可 mock 或用已知 URL）
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/tool/web.rs
-git commit -m "feat: implement web_fetch tool with HTML stripping and size limit"
-```
 
 ### Task 4.4: file_read + file_write 工具
 
@@ -488,13 +425,6 @@ git commit -m "feat: implement web_fetch tool with HTML stripping and size limit
 Run: `cargo test file`
 Expected: 通过
 
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/tool/file.rs
-git commit -m "feat: implement file_read/file_write tools with path traversal protection"
-```
-
 ### Task 4.5: memory_save + memory_search 工具
 
 - [ ] **Step 1: 创建 `src/tool/memory_tool.rs`**
@@ -505,13 +435,6 @@ git commit -m "feat: implement file_read/file_write tools with path traversal pr
 - `MemorySearchTool::execute()`: 提取 query/limit，调用 `memory.search_memory()`，格式化结果为文本
 
 - [ ] **Step 2: 编写测试**（使用 in-memory SQLite）
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/tool/memory_tool.rs
-git commit -m "feat: implement memory_save and memory_search tools"
-```
 
 ### Task 4.6: 工具注册工厂
 
@@ -543,11 +466,18 @@ pub fn create_tool_registry(
 
 - [ ] **Step 2: 运行 `cargo check`**
 
-- [ ] **Step 3: Commit**
+### ✅ Phase 4 验收
 
-```bash
-git add src/tool/mod.rs
-git commit -m "feat: add tool registry factory with config-driven registration"
+- [ ] `cargo build --release` 通过
+- [ ] `cargo test shell` / `cargo test file` 通过
+- [ ] `cargo clippy` 无 warning
+- [ ] 更新进度文档
+
+**Commit 示例：**
+```
+feat(phase4): tool registry and 6 built-in tools (shell, web, file, memory)
+
+Phase 4 - 工具注册中心与 6 个内置工具实现（shell、web、文件、记忆）
 ```
 
 ---
@@ -580,13 +510,6 @@ git commit -m "feat: add tool registry factory with config-driven registration"
 
 - [ ] **Step 3: 运行 `cargo check`**
 
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/agent/prompt.rs src/agent/context.rs
-git commit -m "feat: implement system prompt builder from workspace markdown files"
-```
-
 ### Task 5.2: AgentCore agentic loop
 
 - [ ] **Step 1: 创建 `src/agent/mod.rs`**
@@ -616,11 +539,18 @@ git commit -m "feat: implement system prompt builder from workspace markdown fil
 Run: `cargo test agent`
 Expected: 通过
 
-- [ ] **Step 4: Commit**
+### ✅ Phase 5 验收
 
-```bash
-git add src/agent/
-git commit -m "feat: implement AgentCore agentic loop with tool calling"
+- [ ] `cargo build --release` 通过
+- [ ] `cargo test agent` 全部通过
+- [ ] `cargo clippy` 无 warning
+- [ ] 更新进度文档
+
+**Commit 示例：**
+```
+feat(phase5): AgentCore agentic loop with tool calling and context building
+
+Phase 5 - AgentCore agentic loop 实现，含工具调用与上下文构建
 ```
 
 ---
@@ -666,13 +596,6 @@ pub trait Channel: Send + Sync + 'static {
 - `FeishuMessageContent`: 消息内容（text/image/file/post）
 - 实现 `FeishuMessageEvent → InboundMessage` 转换
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/channel/mod.rs src/channel/feishu/types.rs
-git commit -m "feat: define Channel trait and Feishu event types"
-```
-
 ### Task 6.2: 飞书 REST API 封装
 
 - [ ] **Step 1: 创建 `src/channel/feishu/api.rs`**
@@ -687,13 +610,6 @@ git commit -m "feat: define Channel trait and Feishu event types"
 Token 刷新：`POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal`
 
 - [ ] **Step 2: 运行 `cargo check`**
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/channel/feishu/api.rs
-git commit -m "feat: implement Feishu REST API client with token auto-refresh"
-```
 
 ### Task 6.3: 飞书 WebSocket 连接管理
 
@@ -713,13 +629,6 @@ git commit -m "feat: implement Feishu REST API client with token auto-refresh"
   - 失败后指数退避重连（1s, 2s, 4s, 8s... 最大 60s）
   - 成功连接后重置退避计数
 
-- [ ] **Step 2: Commit**
-
-```bash
-git add src/channel/feishu/ws.rs
-git commit -m "feat: implement Feishu WebSocket connection with auto-reconnect"
-```
-
 ### Task 6.4: FeishuChannel 组装
 
 - [ ] **Step 1: 创建 `src/channel/feishu/mod.rs`**
@@ -732,11 +641,17 @@ git commit -m "feat: implement Feishu WebSocket connection with auto-reconnect"
 
 - [ ] **Step 2: 运行 `cargo check`**
 
-- [ ] **Step 3: Commit**
+### ✅ Phase 6 验收
 
-```bash
-git add src/channel/feishu/mod.rs
-git commit -m "feat: assemble FeishuChannel implementing Channel trait"
+- [ ] `cargo build --release` 通过
+- [ ] `cargo clippy` 无 warning
+- [ ] 更新进度文档
+
+**Commit 示例：**
+```
+feat(phase6): Feishu channel with WebSocket, REST API and auto-reconnect
+
+Phase 6 - 飞书 Channel 实现，含 WebSocket 连接、REST API 与自动重连
 ```
 
 ---
@@ -762,11 +677,17 @@ git commit -m "feat: assemble FeishuChannel implementing Channel trait"
 
 - [ ] **Step 2: 在 `main.rs` 中 `mod gateway;`，运行 `cargo check`**
 
-- [ ] **Step 3: Commit**
+### ✅ Phase 7 验收
 
-```bash
-git add src/gateway.rs src/main.rs
-git commit -m "feat: implement Gateway with message dedup and per-chat serialization"
+- [ ] `cargo build --release` 通过
+- [ ] `cargo clippy` 无 warning
+- [ ] 更新进度文档
+
+**Commit 示例：**
+```
+feat(phase7): Gateway message routing with dedup and per-chat serialization
+
+Phase 7 - Gateway 消息路由，含去重与按会话串行处理
 ```
 
 ---
@@ -788,13 +709,22 @@ git commit -m "feat: implement Gateway with message dedup and per-chat serializa
   1. `tokio::time::interval(Duration::from_secs(interval_minutes * 60))`
   2. 每次 tick: 读 HEARTBEAT.md → 构建 heartbeat InboundMessage → load history → agent.handle → save_conversation → 判断 HEARTBEAT_OK → 发送通知
 
+> **TODO(future):** Heartbeat 目前内嵌在主 crate 中，未来拆分为独立 workspace crate 时，
+> 将其迁移到 `crates/heartbeat/` 并通过消息总线与主进程通信。
+
 - [ ] **Step 2: 运行 `cargo check`**
 
-- [ ] **Step 3: Commit**
+### ✅ Phase 8 验收
 
-```bash
-git add src/heartbeat.rs src/main.rs
-git commit -m "feat: implement Heartbeat periodic task with HEARTBEAT_OK convention"
+- [ ] `cargo build --release` 通过
+- [ ] `cargo clippy` 无 warning
+- [ ] 更新进度文档
+
+**Commit 示例：**
+```
+feat(phase8): Heartbeat periodic task with HEARTBEAT_OK convention
+
+Phase 8 - Heartbeat 定时任务，含 HEARTBEAT_OK 静默约定
 ```
 
 ---
@@ -832,13 +762,6 @@ git commit -m "feat: implement Heartbeat periodic task with HEARTBEAT_OK convent
 
 类似地为其他 5 个文件创建基础模板。
 
-- [ ] **Step 2: Commit**
-
-```bash
-git add workspace/
-git commit -m "feat: add workspace template files (AGENTS, SOUL, TOOLS, USER, MEMORY, HEARTBEAT)"
-```
-
 ### Task 9.2: 完成 main.rs 组装
 
 - [ ] **Step 1: 重写 `src/main.rs`**
@@ -864,13 +787,6 @@ git commit -m "feat: add workspace template files (AGENTS, SOUL, TOOLS, USER, ME
 Run: `cargo build`
 Expected: 编译成功
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/main.rs
-git commit -m "feat: wire up main entry point with all modules and graceful shutdown"
-```
-
 ### Task 9.3: 优雅关机
 
 参考设计规格书 §16，完整实现 5 步关机流程。
@@ -887,11 +803,17 @@ git commit -m "feat: wire up main entry point with all modules and graceful shut
 
 - [ ] **Step 2: 运行 `cargo build`**
 
-- [ ] **Step 3: Commit**
+### ✅ Phase 9 验收
 
-```bash
-git add src/main.rs
-git commit -m "feat: implement graceful shutdown on SIGINT/SIGTERM"
+- [ ] `cargo build --release` 通过
+- [ ] `cargo clippy` 无 warning
+- [ ] 更新进度文档
+
+**Commit 示例：**
+```
+feat(phase9): main entry, workspace templates and graceful shutdown
+
+Phase 9 - 主入口组装、workspace 模板文件与优雅关机实现
 ```
 
 ---
@@ -921,13 +843,6 @@ git commit -m "feat: implement graceful shutdown on SIGINT/SIGTERM"
 Run: `cargo test --test integration_test`
 Expected: 通过
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add tests/integration_test.rs
-git commit -m "test: add integration tests for Agent + Memory + Tools pipeline"
-```
-
 ### Task 10.2: 编译验证 + 最终检查
 
 - [ ] **Step 1: 完整编译**
@@ -945,9 +860,16 @@ Expected: 全部通过
 Run: `cargo clippy -- -D warnings`
 Expected: 无警告
 
-- [ ] **Step 4: 最终 Commit**
+### ✅ Phase 10 验收
 
-```bash
-git add -A
-git commit -m "chore: final build verification - all tests pass, clippy clean"
+- [ ] `cargo build --release` 通过
+- [ ] `cargo test` 全部通过
+- [ ] `cargo clippy -- -D warnings` 无警告
+- [ ] 更新进度文档
+
+**Commit 示例：**
+```
+feat(phase10): integration tests and final verification, v1 complete
+
+Phase 10 - 集成测试与最终验证，v1 版本完成
 ```

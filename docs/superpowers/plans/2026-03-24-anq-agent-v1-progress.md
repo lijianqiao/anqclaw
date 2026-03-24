@@ -12,7 +12,7 @@
 | 阶段 | 内容 | 状态 | 完成时间 | 备注 |
 |------|------|------|----------|------|
 | Phase 1 | 项目脚手架 + 配置 + 公共类型 | - [x] 已完成 | 2026-03-24 | reqwest 0.13 feature `rustls-tls` → `rustls` |
-| Phase 2 | Memory Store（SQLite） | - [ ] 未开始 | | |
+| Phase 2 | Memory Store（SQLite） | - [x] 已完成 | 2026-03-24 | trigram tokenizer 支持中文子串搜索 |
 | Phase 3 | LLM 抽象层 + 两个 Client | - [ ] 未开始 | | |
 | Phase 4 | Tool Registry + 6 个内置工具 | - [ ] 未开始 | | |
 | Phase 5 | Agent Core — Agentic Loop | - [ ] 未开始 | | |
@@ -41,10 +41,10 @@
 
 | Task | 内容 | 状态 | 备注 |
 |------|------|------|------|
-| 2.1 | 创建 schema.sql | - [ ] 未完成 | |
-| 2.2 | 实现 MemoryStore | - [ ] 未完成 | |
+| 2.1 | 创建 schema.sql | - [x] 已完成 | WAL 模式 + trigram FTS5 虚拟表 |
+| 2.2 | 实现 MemoryStore | - [x] 已完成 | 6 个单元测试全部通过，含 tool_calls 轮次持久化 |
 
-**阶段完成标志:** 3 个单元测试通过（save/get history, search memory, empty history）
+**阶段完成标志:** 6 个单元测试通过（history CRUD、tool_calls 序列化、FTS5 搜索、upsert、空查询）
 
 ---
 
@@ -149,3 +149,4 @@
 |------|----------|
 | 2026-03-24 | 创建进度追踪文档 |
 | 2026-03-24 | Phase 1 完成：脚手架 + 配置 + 公共类型 + tracing |
+| 2026-03-24 | Phase 2 完成：SQLite MemoryStore，WAL + trigram FTS5，6 个测试全通过 |
