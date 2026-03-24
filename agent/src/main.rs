@@ -1,6 +1,7 @@
 mod config;
 mod llm;
 mod memory;
+mod tool;
 mod types;
 
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};

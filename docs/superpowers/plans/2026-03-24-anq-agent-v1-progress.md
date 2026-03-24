@@ -14,7 +14,7 @@
 | Phase 1 | 项目脚手架 + 配置 + 公共类型 | - [x] 已完成 | 2026-03-24 | reqwest 0.13 feature `rustls-tls` → `rustls` |
 | Phase 2 | Memory Store（SQLite） | - [x] 已完成 | 2026-03-24 | trigram tokenizer 支持中文子串搜索 |
 | Phase 3 | LLM 抽象层 + 两个 Client | - [x] 已完成 | 2026-03-24 | LlmClient trait + Anthropic + OpenAI-compat |
-| Phase 4 | Tool Registry + 6 个内置工具 | - [ ] 未开始 | | |
+| Phase 4 | Tool Registry + 6 个内置工具 | - [x] 已完成 | 2026-03-24 | 6 工具 + 路径沙箱 + shell 白名单 + 并发执行 |
 | Phase 5 | Agent Core — Agentic Loop | - [ ] 未开始 | | |
 | Phase 6 | 飞书 Channel 实现 | - [ ] 未开始 | | |
 | Phase 7 | Gateway 消息路由 | - [ ] 未开始 | | |
@@ -65,12 +65,12 @@
 
 | Task | 内容 | 状态 | 备注 |
 |------|------|------|------|
-| 4.1 | Tool trait + ToolRegistry | - [ ] 未完成 | |
-| 4.2 | shell_exec 工具 | - [ ] 未完成 | |
-| 4.3 | web_fetch 工具 | - [ ] 未完成 | |
-| 4.4 | file_read + file_write 工具 | - [ ] 未完成 | |
-| 4.5 | memory_save + memory_search 工具 | - [ ] 未完成 | |
-| 4.6 | 工具注册工厂 | - [ ] 未完成 | |
+| 4.1 | Tool trait + ToolRegistry | - [x] 已完成 | object-safe trait, `execute_batch` 并发执行 + 错误隔离 |
+| 4.2 | shell_exec 工具 | - [x] 已完成 | 白名单校验 + 超时 kill + 跨平台 (cmd/sh) |
+| 4.3 | web_fetch 工具 | - [x] 已完成 | HTML strip + body 截断 + 空白折叠 |
+| 4.4 | file_read + file_write 工具 | - [x] 已完成 | 路径 canonicalize 沙箱防护 + 自动创建父目录 |
+| 4.5 | memory_save + memory_search 工具 | - [x] 已完成 | MemoryStore 薄封装，tags 可选 |
+| 4.6 | 工具注册工厂 | - [x] 已完成 | 按 config 开关注册，带 tracing 日志 |
 
 **阶段完成标志:** 工具单元测试通过（shell 白名单、file 路径穿越防护、memory 读写）
 
@@ -151,3 +151,4 @@
 | 2026-03-24 | Phase 1 完成：脚手架 + 配置 + 公共类型 + tracing |
 | 2026-03-24 | Phase 2 完成：SQLite MemoryStore，WAL + trigram FTS5，6 个测试全通过 |
 | 2026-03-24 | Phase 3 完成：LlmClient trait + Anthropic/OpenAI-compat 双端实现 |
+| 2026-03-24 | Phase 4 完成：Tool trait + ToolRegistry + 6 个内置工具（shell/web/file/memory） |
