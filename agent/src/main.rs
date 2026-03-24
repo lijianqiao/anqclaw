@@ -1,4 +1,5 @@
 mod config;
+mod llm;
 mod memory;
 mod types;
 

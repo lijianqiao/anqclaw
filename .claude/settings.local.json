@@ -1,6 +1,16 @@
 {
   "permissions": {
+    "initialPermissionMode": "acceptEdits",
     "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Bash",
+      "Git",
+      "Npm",
+      "Pip",
+      "Grep",
+      "Glob",
       "Bash(curl -s https://crates.io/api/v1/crates/tokio)",
       "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); c=d[''''crate'''']; print\\(fName: {c[''''name'''']}\\\\nVersion: {c[''''max_stable_version'''']}\\\\nDownloads: {c[''''downloads'''']}\\\\nUpdated: {c[''''updated_at'''']}\\)\")",
       "Bash(curl -s https://crates.io/api/v1/crates/tokio-tungstenite)",
@@ -23,6 +33,11 @@
       "Bash(git commit -m \"feat: initialize tracing-subscriber with JSON output:*)",
       "Bash(ANQ_LLM_API_KEY=test ANQ_FEISHU_APP_SECRET=test RUST_LOG=debug cargo run)",
       "Bash(cargo test:*)"
+    ],
+    "deny": [
+      "Rm",
+      "Ssh",
+      "Sud"
     ]
   }
 }
