@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s https://crates.io/api/v1/crates/tokio)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); c=d[''''crate'''']; print\\(fName: {c[''''name'''']}\\\\nVersion: {c[''''max_stable_version'''']}\\\\nDownloads: {c[''''downloads'''']}\\\\nUpdated: {c[''''updated_at'''']}\\)\")",
+      "Bash(curl -s https://crates.io/api/v1/crates/tokio-tungstenite)",
+      "Bash(curl -s https://crates.io/api/v1/crates/reqwest)",
+      "Bash(curl -s https://crates.io/api/v1/crates/serde)",
+      "Bash(curl -s https://crates.io/api/v1/crates/serde_json)",
+      "Bash(curl -s https://crates.io/api/v1/crates/sqlx)",
+      "Bash(curl -s https://crates.io/api/v1/crates/toml)",
+      "Bash(curl -s https://crates.io/api/v1/crates/tracing)",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:blog.rust-lang.org)"
+    ]
+  }
+}
