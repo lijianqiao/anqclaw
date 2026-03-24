@@ -11,7 +11,17 @@
       "Bash(curl -s https://crates.io/api/v1/crates/toml)",
       "Bash(curl -s https://crates.io/api/v1/crates/tracing)",
       "WebFetch(domain:crates.io)",
-      "WebFetch(domain:blog.rust-lang.org)"
+      "WebFetch(domain:blog.rust-lang.org)",
+      "Bash(cargo check:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(p[''''id''''], p[''''version'''']\\) for p in data.get\\(''''packages'''',[]\\) if ''''secrecy'''' in p[''''name'''']]\")",
+      "Bash(ANQ_LLM_API_KEY=\"sk-test-key\" ANQ_FEISHU_APP_SECRET=\"test-secret\" cargo run)",
+      "mcp__Desktop_Commander__read_file",
+      "mcp__Desktop_Commander__write_file",
+      "Bash(ANQ_LLM_API_KEY=test ANQ_FEISHU_APP_SECRET=test cargo run)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"feat: initialize tracing-subscriber with JSON output:*)",
+      "Bash(ANQ_LLM_API_KEY=test ANQ_FEISHU_APP_SECRET=test RUST_LOG=debug cargo run)"
     ]
   }
 }
