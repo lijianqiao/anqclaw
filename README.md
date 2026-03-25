@@ -1,53 +1,76 @@
 # anqclaw
 
-anqclaw 是一个用 Rust 构建的私人 AI 助理。
+anqclaw 是一个用 Rust 构建的私人 AI 助理，支持飞书接入、CLI 对话、多 LLM、工具调用与持久记忆。
 
-目标是通过飞书 WebSocket 收发消息，结合多 LLM、工具调用、SQLite 持久记忆和定时任务，形成可长期运行的个人智能助手。
+## 当前版本
+
+- 版本：v0.2.0
+- 状态：v1 + v2 计划能力已完成
 
 ## 核心能力
 
-- 飞书消息接入（WebSocket）与回复（REST API）
-- 多 LLM 支持：Anthropic + OpenAI-compatible
-- Agentic Loop：LLM 与工具多轮协作
-- 内置 6 个工具：shell、web、file、memory
+- 多 LLM Profile（Anthropic / OpenAI-compatible / Ollama 等）
+- Agentic Loop（LLM 与工具多轮协作）
+- 内置工具：shell、web、file、memory
 - SQLite 对话历史与长期记忆（FTS5）
-- Heartbeat 定时任务
+- 飞书通道（可选启用）
+- CLI 子命令：serve、chat、onboard、config show、config validate
+- 配置与数据目录分离：`~/.anqclaw/`
 
 ## 架构概览
 
-消息主链路：
+主链路：
 
-Feishu Channel -> Gateway -> AgentCore -> Tool Registry / MemoryStore -> Feishu Channel
+Feishu/CLI Channel -> Gateway -> AgentCore -> ToolRegistry/MemoryStore -> Channel
 
-模块职责：
+核心模块：
 
-- channel：平台接入（飞书）
-- gateway：消息路由、去重、按会话串行
-- agent：上下文构建与 agentic loop
-- llm：统一抽象与具体 Provider 客户端
-- tool：工具注册与并发执行
-- memory：SQLite 历史与长期记忆
-- heartbeat：定时触发任务
+- `channel`：飞书与 CLI 输入输出
+- `gateway`：路由、去重、会话串行
+- `agent`：上下文拼装与 agentic loop
+- `llm`：多 Provider 抽象与客户端
+- `tool`：工具注册与并发执行
+- `memory`：SQLite 历史与长期记忆
 
-## 项目结构
+## 快速开始
 
-主工程位于 [agent](agent)。
-
-设计文档位于 [docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md](docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md)。
-
-实施计划位于 [docs/superpowers/plans/2026-03-24-anqclaw-v1-plan.md](docs/superpowers/plans/2026-03-24-anqclaw-v1-plan.md)。
-
-进度追踪位于 [docs/superpowers/plans/2026-03-24-anqclaw-v1-progress.md](docs/superpowers/plans/2026-03-24-anqclaw-v1-progress.md)。
-
-## 快速启动
-
-1. 进入工程目录。
-2. 配置 [agent/config.toml](agent/config.toml)。
-3. 设置必要环境变量（如 ANQ_LLM_API_KEY、ANQ_FEISHU_APP_SECRET）。
-4. 运行：
+1. 构建：
 
 ```bash
 cd agent
-cargo check
-cargo run
+cargo build
 ```
+
+2. 初始化（推荐首次使用）：
+
+```bash
+cargo run -- onboard
+```
+
+3. CLI 对话：
+
+```bash
+cargo run -- chat "你好"
+# 或交互模式
+cargo run -- chat
+```
+
+4. 启动服务模式：
+
+```bash
+cargo run -- serve
+```
+
+5. 配置查看与校验：
+
+```bash
+cargo run -- config show
+cargo run -- config validate
+```
+
+## 文档
+
+- 架构设计：[docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md](docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md)
+- v1 计划：[docs/superpowers/plans/2026-03-24-anqclaw-v1-plan.md](docs/superpowers/plans/2026-03-24-anqclaw-v1-plan.md)
+- v1 进度：[docs/superpowers/plans/2026-03-24-anqclaw-v1-progress.md](docs/superpowers/plans/2026-03-24-anqclaw-v1-progress.md)
+- v2 计划与完成记录：[docs/superpowers/plans/2026-03-25-anqclaw-v2-plan.md](docs/superpowers/plans/2026-03-25-anqclaw-v2-plan.md)
