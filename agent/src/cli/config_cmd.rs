@@ -60,6 +60,7 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     println!("  max_tokens = {}", config.llm.max_tokens);
     println!("  temperature = {}", config.llm.temperature);
     println!("  supports_tools = {}", config.llm.supports_tools);
+    println!("  max_retries = {}", config.llm.max_retries);
 
     if config.llm_profiles.len() > 1 {
         println!();
@@ -78,7 +79,7 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     println!();
 
     if let Some(ref feishu) = config.feishu {
-        println!("\x1b[1m[feishu]\x1b[0m");
+        println!("\x1b[1m[channel.feishu]\x1b[0m");
         println!("  app_id     = {}", feishu.app_id);
         println!(
             "  app_secret = {}",
@@ -88,8 +89,27 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
             println!("  allow_from = {:?}", feishu.allow_from);
         }
     } else {
-        println!("\x1b[1m[feishu]\x1b[0m (not configured)");
+        println!("\x1b[1m[channel.feishu]\x1b[0m (not configured)");
     }
+    println!();
+
+    println!("\x1b[1m[security]\x1b[0m");
+    println!("  auto_redact_secrets = {}", config.security.auto_redact_secrets);
+    if !config.security.trusted_dirs.is_empty() {
+        println!("  trusted_dirs        = {:?}", config.security.trusted_dirs);
+    }
+    if !config.security.blocked_dirs.is_empty() {
+        println!("  blocked_dirs        = {:?}", config.security.blocked_dirs);
+    }
+    if !config.security.redact_patterns.is_empty() {
+        println!("  redact_patterns     = {:?}", config.security.redact_patterns);
+    }
+    println!();
+
+    println!("\x1b[1m[limits]\x1b[0m");
+    println!("  max_requests_per_minute    = {}", config.limits.max_requests_per_minute);
+    println!("  max_tokens_per_conversation = {}", config.limits.max_tokens_per_conversation);
+    println!("  max_message_length         = {}", config.limits.max_message_length);
     println!();
 
     println!("\x1b[1m[memory]\x1b[0m");
@@ -99,8 +119,9 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     println!();
 
     println!("\x1b[1m[agent]\x1b[0m");
-    println!("  max_tool_rounds = {}", config.agent.max_tool_rounds);
-    println!("  llm_profile     = {}", config.agent.llm_profile);
+    println!("  max_tool_rounds    = {}", config.agent.max_tool_rounds);
+    println!("  llm_profile        = {}", config.agent.llm_profile);
+    println!("  fallback_profile   = {}", if config.agent.fallback_profile.is_empty() { "(none)" } else { &config.agent.fallback_profile });
     println!();
 
     println!("\x1b[1m[heartbeat]\x1b[0m");
@@ -108,6 +129,13 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     if config.heartbeat.enabled {
         println!("  interval_minutes = {}", config.heartbeat.interval_minutes);
         println!("  notify_channel   = {}", config.heartbeat.notify_channel);
+    }
+    println!();
+
+    println!("\x1b[1m[audit]\x1b[0m");
+    println!("  enabled  = {}", config.audit.enabled);
+    if config.audit.enabled {
+        println!("  log_file = {}", config.audit.log_file);
     }
 
     Ok(())
@@ -143,19 +171,19 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
                 println!("✗ LLM api_key is empty — set it in config or via env var");
             }
 
-            // 4. Check feishu
+            // 4. Check feishu (channel.feishu or legacy [feishu])
             if let Some(ref feishu) = config.feishu {
                 if !feishu.app_id.is_empty() {
-                    println!("✓ Feishu app_id present");
+                    println!("✓ [channel.feishu] app_id present");
                 }
                 let secret = feishu.app_secret.expose_secret();
                 if !secret.is_empty() {
-                    println!("✓ Feishu app_secret present");
+                    println!("✓ [channel.feishu] app_secret present");
                 } else {
-                    println!("✗ Feishu app_secret is empty");
+                    println!("✗ [channel.feishu] app_secret is empty");
                 }
             } else {
-                println!("ℹ Feishu not configured (optional)");
+                println!("ℹ [channel.feishu] not configured (optional)");
             }
 
             // 5. Check workspace directory

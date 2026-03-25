@@ -55,16 +55,34 @@ fn resolve_safe_path(sandbox: &Path, user_path: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+// ─── Blocked directory check ─────────────────────────────────────────────────
+
+fn check_blocked_dirs(path: &Path, blocked_dirs: &[String]) -> Result<()> {
+    let path_str = path.to_string_lossy();
+    for dir in blocked_dirs {
+        if path_str.contains(dir.as_str()) {
+            bail!(
+                "path `{}` references blocked directory: {}",
+                path.display(),
+                dir
+            );
+        }
+    }
+    Ok(())
+}
+
 // ─── file_read ───────────────────────────────────────────────────────────────
 
 pub struct FileRead {
     sandbox: PathBuf,
+    blocked_dirs: Vec<String>,
 }
 
 impl FileRead {
-    pub fn new(file_access_dir: &str) -> Self {
+    pub fn new(file_access_dir: &str, blocked_dirs: Vec<String>) -> Self {
         Self {
             sandbox: PathBuf::from(file_access_dir),
+            blocked_dirs,
         }
     }
 
@@ -75,6 +93,7 @@ impl FileRead {
             .ok_or_else(|| anyhow::anyhow!("missing `path` parameter"))?;
 
         let path = resolve_safe_path(&self.sandbox, path_str)?;
+        check_blocked_dirs(&path, &self.blocked_dirs)?;
 
         let content = tokio::fs::read_to_string(&path)
             .await
@@ -118,12 +137,14 @@ impl Tool for FileRead {
 
 pub struct FileWrite {
     sandbox: PathBuf,
+    blocked_dirs: Vec<String>,
 }
 
 impl FileWrite {
-    pub fn new(file_access_dir: &str) -> Self {
+    pub fn new(file_access_dir: &str, blocked_dirs: Vec<String>) -> Self {
         Self {
             sandbox: PathBuf::from(file_access_dir),
+            blocked_dirs,
         }
     }
 
@@ -139,6 +160,7 @@ impl FileWrite {
             .ok_or_else(|| anyhow::anyhow!("missing `content` parameter"))?;
 
         let path = resolve_safe_path(&self.sandbox, path_str)?;
+        check_blocked_dirs(&path, &self.blocked_dirs)?;
 
         tokio::fs::write(&path, content)
             .await

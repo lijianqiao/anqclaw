@@ -5,6 +5,7 @@
 
 use anyhow::{bail, Result};
 use std::future::Future;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -13,14 +14,50 @@ use super::Tool;
 pub struct WebFetch {
     timeout: Duration,
     max_bytes: u64,
+    blocked_domains: Vec<String>,
 }
 
 impl WebFetch {
-    pub fn new(timeout_secs: u32, max_bytes: u64) -> Self {
+    pub fn new(timeout_secs: u32, max_bytes: u64, blocked_domains: Vec<String>) -> Self {
         Self {
             timeout: Duration::from_secs(timeout_secs as u64),
             max_bytes,
+            blocked_domains,
         }
+    }
+
+    fn check_domain(&self, url: &str) -> Result<()> {
+        if let Ok(parsed) = url::Url::parse(url)
+            && let Some(host) = parsed.host_str()
+        {
+            // 1. Check against configured blocked domains
+            for blocked in &self.blocked_domains {
+                if host == blocked.as_str() || host.ends_with(&format!(".{}", blocked)) {
+                    bail!("domain `{host}` is blocked (anti-SSRF protection)");
+                }
+            }
+
+            // 2. Check for private/reserved IPs using std::net (covers all RFC ranges)
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                let is_blocked = match ip {
+                    IpAddr::V4(v4) => {
+                        v4.is_private()          // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                        || v4.is_loopback()      // 127.0.0.0/8
+                        || v4.is_link_local()    // 169.254.0.0/16 (cloud metadata)
+                        || v4.is_unspecified()   // 0.0.0.0
+                        || v4.is_broadcast()     // 255.255.255.255
+                    }
+                    IpAddr::V6(v6) => {
+                        v6.is_loopback()         // ::1
+                        || v6.is_unspecified()   // ::
+                    }
+                };
+                if is_blocked {
+                    bail!("IP address `{host}` is blocked — private/reserved range (anti-SSRF)");
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn do_execute(&self, args: serde_json::Value) -> Result<String> {
@@ -28,6 +65,9 @@ impl WebFetch {
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing `url` parameter"))?;
+
+        // Check blocked domains
+        self.check_domain(url)?;
 
         let client = reqwest::Client::builder()
             .timeout(self.timeout)

@@ -114,6 +114,13 @@ impl Gateway {
             .clone();
         let _guard = lock.lock().await;
 
+        // 0. Acknowledge receipt (fire-and-forget reaction)
+        if let Some(ch) = self.channels.iter().find(|c| c.name() == msg.channel)
+            && let Err(e) = ch.acknowledge(&msg).await
+        {
+            tracing::debug!(error = %e, "acknowledge failed (non-critical)");
+        }
+
         // 1. Load history from SQLite
         let history = self
             .memory

@@ -15,7 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::config::ToolsSection;
+use crate::config::{SecuritySection, ToolsSection};
 use crate::memory::MemoryStore;
 use crate::types::{ToolCall, ToolDefinition, ToolResult};
 
@@ -50,12 +50,23 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     /// Creates a registry and registers tools based on config toggles.
-    pub fn new(config: &ToolsSection, memory_store: Arc<MemoryStore>) -> Self {
+    pub fn new(config: &ToolsSection, security: &SecuritySection, memory_store: Arc<MemoryStore>) -> Self {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
 
         if config.shell_enabled {
+            // Merge hardcoded blocked dirs with config blocked dirs
+            let mut all_blocked_dirs: Vec<String> = crate::config::HARDCODED_BLOCKED_DIRS
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            all_blocked_dirs.extend(security.blocked_dirs.iter().cloned());
+
             let t = shell::ShellExec::new(
+                &config.shell_permission_level,
                 &config.shell_allowed_commands,
+                &config.shell_extra_allowed,
+                &config.shell_blocked_commands,
+                all_blocked_dirs,
                 config.shell_timeout_secs,
             );
             tools.insert(t.name().to_string(), Arc::new(t));
@@ -65,13 +76,20 @@ impl ToolRegistry {
             let t = web::WebFetch::new(
                 config.web_fetch_timeout_secs,
                 config.web_fetch_max_bytes,
+                config.web_blocked_domains.clone(),
             );
             tools.insert(t.name().to_string(), Arc::new(t));
         }
 
         if config.file_enabled {
-            let read_tool = file::FileRead::new(&config.file_access_dir);
-            let write_tool = file::FileWrite::new(&config.file_access_dir);
+            let mut all_blocked_dirs: Vec<String> = crate::config::HARDCODED_BLOCKED_DIRS
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            all_blocked_dirs.extend(security.blocked_dirs.iter().cloned());
+
+            let read_tool = file::FileRead::new(&config.file_access_dir, all_blocked_dirs.clone());
+            let write_tool = file::FileWrite::new(&config.file_access_dir, all_blocked_dirs);
             tools.insert(read_tool.name().to_string(), Arc::new(read_tool));
             tools.insert(write_tool.name().to_string(), Arc::new(write_tool));
         }

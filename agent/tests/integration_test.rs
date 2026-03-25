@@ -105,8 +105,8 @@ async fn test_pure_text_reply() {
         tool_calls: vec![],
     }]));
 
-    let tools = Arc::new(ToolRegistry::new(&config.tools, memory.clone()));
-    let agent = AgentCore::new(mock_llm, tools, memory.clone(), config);
+    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
+    let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None);
 
     let msg = test_inbound("Hi");
     let (reply, persist) = agent.handle(&msg, &[]).await;
@@ -145,8 +145,8 @@ async fn test_tool_call_and_reply() {
         },
     ]));
 
-    let tools = Arc::new(ToolRegistry::new(&config.tools, memory.clone()));
-    let agent = AgentCore::new(mock_llm, tools, memory.clone(), config);
+    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
+    let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None);
 
     let msg = test_inbound("My name is Test User");
     let (reply, persist) = agent.handle(&msg, &[]).await;
@@ -178,8 +178,8 @@ async fn test_history_persistence() {
         },
     ]));
 
-    let tools = Arc::new(ToolRegistry::new(&config.tools, memory.clone()));
-    let agent = AgentCore::new(mock_llm, tools, memory.clone(), config.clone());
+    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
+    let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config.clone(), None);
 
     // First message
     let msg1 = test_inbound("Hello");
@@ -241,8 +241,8 @@ async fn test_multi_tool_calls() {
         },
     ]));
 
-    let tools = Arc::new(ToolRegistry::new(&config.tools, memory.clone()));
-    let agent = AgentCore::new(mock_llm, tools, memory.clone(), config);
+    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
+    let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None);
 
     let msg = test_inbound("Save and search");
     let (reply, persist) = agent.handle(&msg, &[]).await;
@@ -285,8 +285,8 @@ max_tool_rounds = 2
         }],
     }]));
 
-    let tools = Arc::new(ToolRegistry::new(&config.tools, memory.clone()));
-    let agent = AgentCore::new(mock_llm, tools, memory, config);
+    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
+    let agent = AgentCore::new(mock_llm, None, tools, memory, config, None);
 
     let msg = test_inbound("trigger loop");
     let (reply, _) = agent.handle(&msg, &[]).await;

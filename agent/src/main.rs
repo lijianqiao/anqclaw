@@ -1,4 +1,5 @@
 mod agent;
+mod audit;
 mod channel;
 mod cli;
 mod config;
@@ -185,9 +186,43 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
         "LLM client created"
     );
 
+    // Create fallback LLM client if configured
+    let fallback_llm = if !config.agent.fallback_profile.is_empty() {
+        if let Some(fallback_config) = config.llm_profiles.get(&config.agent.fallback_profile) {
+            Some(create_llm_client(fallback_config))
+        } else {
+            tracing::warn!(
+                profile = config.agent.fallback_profile.as_str(),
+                "fallback LLM profile not found, ignoring"
+            );
+            None
+        }
+    } else {
+        None
+    };
+
+    // Initialize audit logger
+    let audit_logger = if config.audit.enabled {
+        let audit_path = resolve_path(&home, &config.audit.log_file)
+            .to_string_lossy()
+            .into_owned();
+        match audit::AuditLogger::new(&audit_path) {
+            Ok(logger) => {
+                tracing::info!(path = audit_path.as_str(), "audit logging enabled");
+                Some(Arc::new(logger))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to initialize audit logger, continuing without");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Create ToolRegistry & AgentCore
-    let tools = Arc::new(ToolRegistry::new(&config.tools, memory.clone()));
-    let agent = Arc::new(AgentCore::new(llm, tools, memory.clone(), config.clone()));
+    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
+    let agent = Arc::new(AgentCore::new(llm, fallback_llm, tools, memory.clone(), config.clone(), audit_logger));
 
     Ok(Bootstrap { config, memory, agent, home })
 }

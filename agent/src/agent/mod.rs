@@ -5,11 +5,13 @@
 
 pub mod context;
 pub mod prompt;
+pub mod redact;
 
 use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::audit::AuditLogger;
 use crate::config::AppConfig;
 use crate::llm::LlmClient;
 use crate::memory::MemoryStore;
@@ -22,23 +24,37 @@ use context::{build_system_prompt, format_memories};
 
 pub struct AgentCore {
     llm: Arc<dyn LlmClient>,
+    fallback_llm: Option<Arc<dyn LlmClient>>,
     tools: Arc<ToolRegistry>,
     memory: Arc<MemoryStore>,
     config: Arc<AppConfig>,
+    /// Cached secret values for redaction
+    secrets: Vec<String>,
+    audit: Option<Arc<AuditLogger>>,
 }
 
 impl AgentCore {
     pub fn new(
         llm: Arc<dyn LlmClient>,
+        fallback_llm: Option<Arc<dyn LlmClient>>,
         tools: Arc<ToolRegistry>,
         memory: Arc<MemoryStore>,
         config: Arc<AppConfig>,
+        audit: Option<Arc<AuditLogger>>,
     ) -> Self {
+        let secrets = if config.security.auto_redact_secrets {
+            redact::collect_secrets(&config)
+        } else {
+            vec![]
+        };
         Self {
             llm,
+            fallback_llm,
             tools,
             memory,
             config,
+            secrets,
+            audit,
         }
     }
 
@@ -106,10 +122,36 @@ impl AgentCore {
         // 5. Agentic loop
         let max_rounds = self.config.agent.max_tool_rounds;
         for round in 0..max_rounds {
-            let response = self.llm.chat(&messages, &tool_defs).await?;
+            let llm_start = std::time::Instant::now();
+            let response = match self.llm.chat(&messages, &tool_defs).await {
+                Ok(r) => r,
+                Err(e) => {
+                    if let Some(ref fallback) = self.fallback_llm {
+                        tracing::warn!(error = %e, "primary LLM failed, trying fallback");
+                        fallback.chat(&messages, &tool_defs).await?
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
+            let llm_duration_ms = llm_start.elapsed().as_millis() as u64;
 
             let has_tool_calls = !response.tool_calls.is_empty();
             let has_text = response.text.is_some();
+
+            // Audit: log LLM call
+            if let Some(ref audit) = self.audit
+                && self.config.audit.log_llm_calls
+            {
+                audit.log_llm_call(
+                    &msg.chat_id,
+                    &self.config.llm.model,
+                    messages.len(),
+                    has_tool_calls,
+                    has_text,
+                    llm_duration_ms,
+                );
+            }
 
             if has_tool_calls {
                 // Record assistant message with tool calls
@@ -124,8 +166,29 @@ impl AgentCore {
                     "executing tool calls"
                 );
 
-                // Execute all tool calls concurrently
+                // Execute all tool calls concurrently (with timing)
+                let tools_start = std::time::Instant::now();
                 let results = self.tools.execute_batch(&response.tool_calls).await;
+                let tools_duration_ms = tools_start.elapsed().as_millis() as u64;
+
+                // Audit: log each tool call
+                if let Some(ref audit) = self.audit
+                    && self.config.audit.log_tool_calls
+                {
+                    // Distribute total batch time equally as approximation;
+                    // for precise per-tool timing, execute_batch would need to return durations.
+                    let per_tool_ms = tools_duration_ms / results.len().max(1) as u64;
+                    for (call, result) in response.tool_calls.iter().zip(results.iter()) {
+                        audit.log_tool_call(
+                            &msg.chat_id,
+                            &call.name,
+                            &call.arguments,
+                            &result.output,
+                            result.is_error,
+                            per_tool_ms,
+                        );
+                    }
+                }
 
                 // Append each tool result
                 for result in &results {
@@ -135,7 +198,17 @@ impl AgentCore {
                 // Continue loop — let LLM see the results
             } else if has_text {
                 // Pure text response — done
-                let text = response.text.unwrap();
+                let mut text = response.text.unwrap();
+
+                // Apply redaction if enabled
+                if self.config.security.auto_redact_secrets {
+                    text = redact::redact_output(
+                        &text,
+                        &self.secrets,
+                        &self.config.security.redact_patterns,
+                    );
+                }
+
                 messages.push(ChatMessage::assistant(&text));
 
                 let reply = OutboundMessage {
@@ -266,8 +339,8 @@ max_tool_rounds = 3
             tool_calls: vec![],
         }]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, memory.clone()));
-        let agent = AgentCore::new(mock_llm, tools, memory, config);
+        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None);
 
         let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
 
@@ -299,8 +372,8 @@ max_tool_rounds = 3
             },
         ]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, memory.clone()));
-        let agent = AgentCore::new(mock_llm, tools, memory, config);
+        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None);
 
         let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
 
@@ -324,8 +397,8 @@ max_tool_rounds = 3
             }],
         }]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, memory.clone()));
-        let agent = AgentCore::new(mock_llm, tools, memory, config);
+        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None);
 
         let (reply, _persist) = agent.handle(&test_inbound(), &[]).await;
 

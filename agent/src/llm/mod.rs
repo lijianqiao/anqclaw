@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod openai_compat;
+pub mod retry;
 
 use anyhow::Result;
 use std::future::Future;
@@ -41,7 +42,7 @@ pub trait LlmClient: Send + Sync {
 /// Convenience aliases: `openai`, `deepseek`, `qwen`, `ollama`, `gemini` all resolve
 /// to `OpenAiCompatClient` — the only difference is `base_url` + `api_key` in config.
 pub fn create_llm_client(config: &LlmSection) -> Arc<dyn LlmClient> {
-    match config.provider.as_str() {
+    let inner: Arc<dyn LlmClient> = match config.provider.as_str() {
         "anthropic" => Arc::new(anthropic::AnthropicClient::new(config)),
         "openai_compat" | "openai" | "deepseek" | "qwen" | "ollama" | "gemini" | "mimo" => {
             Arc::new(openai_compat::OpenAiCompatClient::new(config))
@@ -50,5 +51,12 @@ pub fn create_llm_client(config: &LlmSection) -> Arc<dyn LlmClient> {
             "Unknown LLM provider: `{other}`. Supported: anthropic, openai_compat, openai, \
              deepseek, qwen, ollama, gemini, mimo"
         ),
+    };
+
+    // Wrap with retry logic if max_retries > 0
+    if config.max_retries > 0 {
+        Arc::new(retry::RetryLlmClient::new(inner, config.max_retries, config.retry_delay_ms))
+    } else {
+        inner
     }
 }

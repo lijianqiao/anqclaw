@@ -243,7 +243,7 @@ fn generate_config(
     s.push('\n');
 
     if let Some((app_id, app_secret)) = feishu {
-        s.push_str("[feishu]\n");
+        s.push_str("[channel.feishu]\n");
         s.push_str(&format!("app_id = \"{app_id}\"\n"));
         s.push_str(&format!("app_secret = \"{app_secret}\"\n"));
         s.push_str("# allow_from = [\"ou_xxxx\"]  # 可选：限制可交互的用户\n\n");
@@ -251,9 +251,19 @@ fn generate_config(
 
     s.push_str("[tools]\n");
     s.push_str("shell_enabled = true\n");
+    s.push_str("shell_permission_level = \"supervised\"\n");
     s.push_str("web_fetch_enabled = true\n");
     s.push_str("file_enabled = true\n");
     s.push_str("memory_tool_enabled = true\n\n");
+
+    s.push_str("[security]\n");
+    s.push_str("auto_redact_secrets = true\n");
+    s.push_str("# trusted_dirs = [\"~/projects\"]\n");
+    s.push_str("# blocked_dirs = []  # System dirs are always blocked\n\n");
+
+    s.push_str("[limits]\n");
+    s.push_str("max_requests_per_minute = 20\n");
+    s.push_str("max_message_length = 10000\n\n");
 
     s.push_str("[memory]\n");
     s.push_str("history_limit = 20\n");
@@ -261,11 +271,20 @@ fn generate_config(
 
     s.push_str("[agent]\n");
     s.push_str("max_tool_rounds = 10\n");
-    s.push_str("llm_profile = \"default\"\n\n");
+    s.push_str("llm_profile = \"default\"\n");
+    s.push_str("# fallback_profile = \"deepseek\"  # Fallback LLM when primary fails\n\n");
 
     s.push_str("[heartbeat]\n");
     s.push_str("enabled = false\n");
-    s.push_str("interval_minutes = 30\n");
+    s.push_str("interval_minutes = 30\n\n");
+
+    s.push_str("[audit]\n");
+    s.push_str("enabled = false\n");
+    s.push_str("log_file = \"logs/audit.jsonl\"\n");
+    s.push_str("log_tool_calls = true\n");
+    s.push_str("log_shell_commands = true\n");
+    s.push_str("log_file_writes = true\n");
+    s.push_str("log_llm_calls = false\n");
 
     s
 }

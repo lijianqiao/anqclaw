@@ -1,7 +1,9 @@
 //! `shell_exec` tool — runs a shell command and returns stdout + stderr.
 //!
 //! Safety:
-//! - Only commands whose first token is in the allow-list are executed.
+//! - Three-level permission model: Readonly, Supervised, Full.
+//! - Commands are checked against allow/block lists depending on level.
+//! - Blocked directories are enforced in all modes.
 //! - A configurable timeout kills the process if it runs too long.
 
 use anyhow::{bail, Result};
@@ -12,17 +14,106 @@ use std::time::Duration;
 
 use super::Tool;
 
+/// Built-in readonly commands — safe to run in any mode.
+const READONLY_COMMANDS: &[&str] = &[
+    "ls", "dir", "cat", "head", "tail", "grep", "find", "date", "whoami",
+    "pwd", "wc", "sort", "uniq", "echo", "file", "stat", "type", "where",
+    "hostname", "uname", "df", "du", "env", "printenv", "which",
+];
+
+/// Commands that are ALWAYS blocked regardless of permission level.
+const ALWAYS_BLOCKED: &[&str] = &[
+    "mkfs", "dd", "format", "shutdown", "reboot", "init", "systemctl",
+    "halt", "poweroff",
+];
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PermissionLevel {
+    Readonly,
+    Supervised,
+    Full,
+}
+
+impl PermissionLevel {
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "readonly" => Self::Readonly,
+            "full" => Self::Full,
+            _ => Self::Supervised, // default
+        }
+    }
+}
+
 pub struct ShellExec {
+    permission_level: PermissionLevel,
+    /// For Readonly: only READONLY_COMMANDS
+    /// For Supervised: READONLY_COMMANDS + extra_allowed + legacy allowed_commands
+    /// For Full: everything except blocked
     allowed: HashSet<String>,
+    /// Commands blocked even in Full mode
+    blocked: HashSet<String>,
+    /// Directories blocked from any path arguments
+    blocked_dirs: Vec<String>,
     timeout: Duration,
 }
 
 impl ShellExec {
-    pub fn new(allowed_commands: &[String], timeout_secs: u32) -> Self {
+    pub fn new(
+        permission_level: &str,
+        legacy_allowed_commands: &[String],
+        extra_allowed: &[String],
+        blocked_commands: &[String],
+        blocked_dirs: Vec<String>,
+        timeout_secs: u32,
+    ) -> Self {
+        let level = PermissionLevel::parse(permission_level);
+
+        let mut allowed = HashSet::new();
+        let mut blocked: HashSet<String> = ALWAYS_BLOCKED.iter().map(|s| s.to_string()).collect();
+        blocked.extend(blocked_commands.iter().cloned());
+
+        match level {
+            PermissionLevel::Readonly => {
+                for cmd in READONLY_COMMANDS {
+                    allowed.insert(cmd.to_string());
+                }
+            }
+            PermissionLevel::Supervised => {
+                // Readonly base
+                for cmd in READONLY_COMMANDS {
+                    allowed.insert(cmd.to_string());
+                }
+                // Add legacy allowed_commands for backward compat
+                for cmd in legacy_allowed_commands {
+                    allowed.insert(cmd.clone());
+                }
+                // Add extra allowed
+                for cmd in extra_allowed {
+                    allowed.insert(cmd.clone());
+                }
+            }
+            PermissionLevel::Full => {
+                // In full mode, `allowed` is not checked — only `blocked` matters
+            }
+        }
+
         Self {
-            allowed: allowed_commands.iter().cloned().collect(),
+            permission_level: level,
+            allowed,
+            blocked,
+            blocked_dirs,
             timeout: Duration::from_secs(timeout_secs as u64),
         }
+    }
+
+    /// Check if a command's path arguments reference blocked directories.
+    fn check_blocked_dirs(&self, command: &str) -> Result<()> {
+        for dir in &self.blocked_dirs {
+            if command.contains(dir.as_str()) {
+                bail!("command references blocked directory: {dir}");
+            }
+        }
+        Ok(())
     }
 
     async fn do_execute(&self, args: serde_json::Value) -> Result<String> {
@@ -31,18 +122,42 @@ impl ShellExec {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing `command` parameter"))?;
 
-        // Extract the first token (command name) for allow-list check
-        let first_token = command
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
+        // Extract the first token (command name)
+        let first_token = command.split_whitespace().next().unwrap_or("");
 
-        if !self.allowed.contains(first_token) {
+        // Check blocked commands (applies to ALL modes)
+        if self.blocked.contains(first_token) {
             bail!(
-                "command `{first_token}` is not in the allow-list. Allowed: {:?}",
-                self.allowed
+                "command `{first_token}` is blocked for safety reasons"
             );
         }
+
+        // Also check if the full command starts with any blocked pattern
+        // This catches things like "rm -rf /"
+        for blocked in &self.blocked {
+            if command.trim().starts_with(blocked.as_str()) {
+                bail!("command pattern `{blocked}` is blocked for safety reasons");
+            }
+        }
+
+        // Permission check
+        match self.permission_level {
+            PermissionLevel::Readonly | PermissionLevel::Supervised => {
+                if !self.allowed.contains(first_token) {
+                    bail!(
+                        "command `{first_token}` is not allowed in {:?} mode. Allowed: {:?}",
+                        self.permission_level,
+                        self.allowed
+                    );
+                }
+            }
+            PermissionLevel::Full => {
+                // Full mode: allow everything except blocked
+            }
+        }
+
+        // Check blocked directories
+        self.check_blocked_dirs(command)?;
 
         // Use platform-appropriate shell
         let mut child = {
@@ -116,7 +231,7 @@ impl Tool for ShellExec {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command and return its stdout, stderr, and exit code. Only allowed commands can be executed."
+        "Execute a shell command and return its stdout, stderr, and exit code. Commands are subject to permission level restrictions."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

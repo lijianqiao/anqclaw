@@ -203,6 +203,35 @@ impl FeishuApi {
         Ok(())
     }
 
+    /// Add an emoji reaction to a message.
+    /// emoji_type examples: "OnIt", "THUMBSUP", "HEART", etc.
+    pub async fn add_reaction(&self, message_id: &str, emoji_type: &str) -> Result<()> {
+        let token = self.get_tenant_access_token().await?;
+        let url = format!("{FEISHU_API_BASE}/im/v1/messages/{message_id}/reactions");
+        let body = serde_json::json!({
+            "reaction_type": {
+                "emoji_type": emoji_type
+            }
+        });
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json; charset=utf-8")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            tracing::warn!(status = %status, body = %body, "add_reaction failed (non-critical)");
+        }
+
+        Ok(())
+    }
+
     /// Internal: send a single card, with optional reply-to.
     /// Includes 401/invalid-token retry logic.
     async fn do_send_card(

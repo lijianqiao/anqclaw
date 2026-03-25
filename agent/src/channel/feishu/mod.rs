@@ -67,4 +67,20 @@ impl Channel for FeishuChannel {
     fn name(&self) -> &str {
         "feishu"
     }
+
+    fn acknowledge(
+        &self,
+        msg: &InboundMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+        let message_id = msg.message_id.clone();
+        Box::pin(async move {
+            if !message_id.is_empty() {
+                // Fire-and-forget: don't fail the whole pipeline if reaction fails
+                if let Err(e) = self.api.add_reaction(&message_id, "OnIt").await {
+                    tracing::debug!(error = %e, "failed to add reaction (non-critical)");
+                }
+            }
+            Ok(())
+        })
+    }
 }

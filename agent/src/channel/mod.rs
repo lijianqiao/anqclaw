@@ -34,4 +34,13 @@ pub trait Channel: Send + Sync + 'static {
 
     /// Human-readable channel name (e.g. "feishu").
     fn name(&self) -> &str;
+
+    /// Acknowledge receipt of a message (e.g. add a reaction emoji).
+    /// Default: no-op. Override in channels that support it.
+    fn acknowledge(
+        &self,
+        _msg: &InboundMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
 }

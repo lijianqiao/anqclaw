@@ -88,11 +88,55 @@ fn default_file_enabled() -> bool {
 fn default_file_access_dir() -> String {
     "workspace".to_string()
 }
+fn default_web_blocked_domains() -> Vec<String> {
+    vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "0.0.0.0".to_string(),
+        "169.254.169.254".to_string(), // Cloud metadata SSRF
+        "[::1]".to_string(),
+    ]
+}
 fn default_memory_tool_enabled() -> bool {
     true
 }
 fn default_memory_tool_search_limit() -> u32 {
     5
+}
+fn default_shell_permission_level() -> String {
+    "supervised".to_string()
+}
+fn default_shell_blocked_commands() -> Vec<String> {
+    vec![
+        "rm -rf /".to_string(),
+        "mkfs".to_string(),
+        "dd".to_string(),
+        "format".to_string(),
+        "shutdown".to_string(),
+        "reboot".to_string(),
+        "init".to_string(),
+    ]
+}
+fn default_trusted_dirs() -> Vec<String> {
+    vec![]
+}
+fn default_blocked_dirs() -> Vec<String> {
+    vec![]
+}
+fn default_auto_redact_secrets() -> bool {
+    true
+}
+fn default_redact_patterns() -> Vec<String> {
+    vec![]
+}
+fn default_max_requests_per_minute() -> u32 {
+    20
+}
+fn default_max_tokens_per_conversation() -> u64 {
+    50000
+}
+fn default_max_message_length() -> u32 {
+    10000
 }
 fn default_max_tool_rounds() -> u32 {
     10
@@ -103,6 +147,64 @@ fn default_system_prompt_file() -> String {
 fn default_llm_profile() -> String {
     "default".to_string()
 }
+fn default_max_retries() -> u32 {
+    2
+}
+fn default_retry_delay_ms() -> u64 {
+    1000
+}
+fn default_fallback_profile() -> String {
+    String::new()
+}
+fn default_audit_enabled() -> bool {
+    false
+}
+fn default_audit_log_file() -> String {
+    "logs/audit.jsonl".to_string()
+}
+fn default_log_tool_calls() -> bool {
+    true
+}
+fn default_log_shell_commands() -> bool {
+    true
+}
+fn default_log_file_writes() -> bool {
+    true
+}
+fn default_log_llm_calls() -> bool {
+    false
+}
+
+// ─── Audit section ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AuditSection {
+    #[serde(default = "default_audit_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_audit_log_file")]
+    pub log_file: String,
+    #[serde(default = "default_log_tool_calls")]
+    pub log_tool_calls: bool,
+    #[serde(default = "default_log_shell_commands")]
+    pub log_shell_commands: bool,
+    #[serde(default = "default_log_file_writes")]
+    pub log_file_writes: bool,
+    #[serde(default = "default_log_llm_calls")]
+    pub log_llm_calls: bool,
+}
+
+impl Default for AuditSection {
+    fn default() -> Self {
+        Self {
+            enabled: default_audit_enabled(),
+            log_file: default_audit_log_file(),
+            log_tool_calls: default_log_tool_calls(),
+            log_shell_commands: default_log_shell_commands(),
+            log_file_writes: default_log_file_writes(),
+            log_llm_calls: default_log_llm_calls(),
+        }
+    }
+}
 
 // ─── Raw deserialization structs (secrets as plain String) ────────────────────
 
@@ -112,6 +214,11 @@ struct RawFeishuSection {
     pub app_secret: String,
     #[serde(default = "default_allow_from")]
     pub allow_from: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawChannelSection {
+    pub feishu: Option<RawFeishuSection>,
 }
 
 /// Raw LLM profile — flat format (used in single-profile legacy mode and per-profile).
@@ -133,6 +240,10 @@ struct RawLlmProfile {
     /// Set to false for models that error when `tools` is passed (e.g. some Ollama models).
     #[serde(default = "default_supports_tools")]
     pub supports_tools: bool,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_retry_delay_ms")]
+    pub retry_delay_ms: u64,
 }
 
 /// The `[llm]` section can be one of two forms:
@@ -194,16 +305,26 @@ fn parse_llm_profiles(llm_value: &toml::Value) -> Result<HashMap<String, RawLlmP
 struct RawAppConfig {
     #[serde(default)]
     pub app: AppSection,
+    /// Legacy: `[feishu]` section (still supported for backward compatibility).
     pub feishu: Option<RawFeishuSection>,
+    /// New: `[channel]` section with sub-tables.
+    #[serde(default)]
+    pub channel: Option<RawChannelSection>,
     pub llm: toml::Value,
     #[serde(default)]
     pub tools: ToolsSection,
+    #[serde(default)]
+    pub security: SecuritySection,
+    #[serde(default)]
+    pub limits: LimitsSection,
     #[serde(default)]
     pub memory: MemorySection,
     #[serde(default)]
     pub heartbeat: HeartbeatSection,
     #[serde(default)]
     pub agent: AgentSection,
+    #[serde(default)]
+    pub audit: AuditSection,
 }
 
 // ─── Public config structs ────────────────────────────────────────────────────
@@ -254,16 +375,29 @@ pub struct LlmSection {
     pub temperature: f32,
     /// Whether this model supports tool calling.
     pub supports_tools: bool,
+    pub max_retries: u32,
+    pub retry_delay_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ToolsSection {
     #[serde(default = "default_shell_enabled")]
     pub shell_enabled: bool,
+    /// Deprecated: use `shell_permission_level` + `shell_extra_allowed` instead.
     #[serde(default = "default_shell_allowed_commands")]
     pub shell_allowed_commands: Vec<String>,
     #[serde(default = "default_shell_timeout_secs")]
     pub shell_timeout_secs: u32,
+
+    /// Shell permission level: "readonly", "supervised" (default), "full"
+    #[serde(default = "default_shell_permission_level")]
+    pub shell_permission_level: String,
+    /// Extra commands allowed in supervised mode (appended to built-in readonly set)
+    #[serde(default)]
+    pub shell_extra_allowed: Vec<String>,
+    /// Commands blocked even in full mode (safety net)
+    #[serde(default = "default_shell_blocked_commands")]
+    pub shell_blocked_commands: Vec<String>,
 
     #[serde(default = "default_web_fetch_enabled")]
     pub web_fetch_enabled: bool,
@@ -277,6 +411,10 @@ pub struct ToolsSection {
     #[serde(default = "default_file_access_dir")]
     pub file_access_dir: String,
 
+    /// Domains blocked for web_fetch (anti-SSRF). Default blocks localhost + cloud metadata.
+    #[serde(default = "default_web_blocked_domains")]
+    pub web_blocked_domains: Vec<String>,
+
     #[serde(default = "default_memory_tool_enabled")]
     pub memory_tool_enabled: bool,
     #[serde(default = "default_memory_tool_search_limit")]
@@ -289,11 +427,15 @@ impl Default for ToolsSection {
             shell_enabled: default_shell_enabled(),
             shell_allowed_commands: default_shell_allowed_commands(),
             shell_timeout_secs: default_shell_timeout_secs(),
+            shell_permission_level: default_shell_permission_level(),
+            shell_extra_allowed: vec![],
+            shell_blocked_commands: default_shell_blocked_commands(),
             web_fetch_enabled: default_web_fetch_enabled(),
             web_fetch_timeout_secs: default_web_fetch_timeout_secs(),
             web_fetch_max_bytes: default_web_fetch_max_bytes(),
             file_enabled: default_file_enabled(),
             file_access_dir: default_file_access_dir(),
+            web_blocked_domains: default_web_blocked_domains(),
             memory_tool_enabled: default_memory_tool_enabled(),
             memory_tool_search_limit: default_memory_tool_search_limit(),
         }
@@ -352,6 +494,9 @@ pub struct AgentSection {
     /// Which LLM profile to use. Default: "default".
     #[serde(default = "default_llm_profile")]
     pub llm_profile: String,
+    /// Fallback LLM profile name. Empty = no fallback.
+    #[serde(default = "default_fallback_profile")]
+    pub fallback_profile: String,
 }
 
 impl Default for AgentSection {
@@ -360,6 +505,85 @@ impl Default for AgentSection {
             max_tool_rounds: default_max_tool_rounds(),
             system_prompt_file: default_system_prompt_file(),
             llm_profile: default_llm_profile(),
+            fallback_profile: default_fallback_profile(),
+        }
+    }
+}
+
+// ─── Security ─────────────────────────────────────────────────────────────────
+
+/// System directories that are ALWAYS blocked, regardless of config.
+pub const HARDCODED_BLOCKED_DIRS: &[&str] = &[
+    // Windows
+    "C:\\Windows",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
+    "C:\\ProgramData",
+    // Linux
+    "/boot",
+    "/sbin",
+    "/usr/sbin",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/etc/shadow",
+    // macOS
+    "/System",
+    "/Library",
+    "/private/var",
+    // Sensitive user dirs (all platforms)
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".config/gcloud",
+    ".azure",
+];
+
+#[derive(Debug, Deserialize)]
+pub struct SecuritySection {
+    /// Directories where full permissions apply (shell full + file rw)
+    #[serde(default = "default_trusted_dirs")]
+    pub trusted_dirs: Vec<String>,
+    /// Directories that are always blocked from any operation
+    #[serde(default = "default_blocked_dirs")]
+    pub blocked_dirs: Vec<String>,
+    /// Automatically redact config secret values from LLM output
+    #[serde(default = "default_auto_redact_secrets")]
+    pub auto_redact_secrets: bool,
+    /// Additional regex patterns to redact from LLM output
+    #[serde(default = "default_redact_patterns")]
+    pub redact_patterns: Vec<String>,
+}
+
+impl Default for SecuritySection {
+    fn default() -> Self {
+        Self {
+            trusted_dirs: default_trusted_dirs(),
+            blocked_dirs: default_blocked_dirs(),
+            auto_redact_secrets: default_auto_redact_secrets(),
+            redact_patterns: default_redact_patterns(),
+        }
+    }
+}
+
+// ─── Limits ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct LimitsSection {
+    #[serde(default = "default_max_requests_per_minute")]
+    pub max_requests_per_minute: u32,
+    #[serde(default = "default_max_tokens_per_conversation")]
+    pub max_tokens_per_conversation: u64,
+    #[serde(default = "default_max_message_length")]
+    pub max_message_length: u32,
+}
+
+impl Default for LimitsSection {
+    fn default() -> Self {
+        Self {
+            max_requests_per_minute: default_max_requests_per_minute(),
+            max_tokens_per_conversation: default_max_tokens_per_conversation(),
+            max_message_length: default_max_message_length(),
         }
     }
 }
@@ -369,7 +593,7 @@ impl Default for AgentSection {
 #[derive(Debug)]
 pub struct AppConfig {
     pub app: AppSection,
-    /// `None` if `[feishu]` is omitted from config — Feishu channel won't start.
+    /// `None` if `[feishu]` / `[channel.feishu]` is omitted from config — Feishu channel won't start.
     pub feishu: Option<FeishuSection>,
     /// Named LLM profiles. At least one ("default") is required.
     pub llm_profiles: HashMap<String, LlmSection>,
@@ -377,9 +601,12 @@ pub struct AppConfig {
     /// This is a clone from `llm_profiles` — used by legacy code that expects a single `LlmSection`.
     pub llm: LlmSection,
     pub tools: ToolsSection,
+    pub security: SecuritySection,
+    pub limits: LimitsSection,
     pub memory: MemorySection,
     pub heartbeat: HeartbeatSection,
     pub agent: AgentSection,
+    pub audit: AuditSection,
 }
 
 // ─── Env-var resolution ───────────────────────────────────────────────────────
@@ -429,7 +656,12 @@ impl AppConfig {
         let raw: RawAppConfig = toml::from_str(toml_text).context("Failed to parse config TOML")?;
 
         // --- Feishu (optional) ---
-        let feishu = match raw.feishu {
+        // [channel.feishu] takes precedence over legacy [feishu]
+        let raw_feishu = raw
+            .channel
+            .and_then(|c| c.feishu)
+            .or(raw.feishu);
+        let feishu = match raw_feishu {
             Some(f) => {
                 let app_secret_str = resolve_env(&f.app_secret, "feishu.app_secret")?;
                 Some(FeishuSection {
@@ -458,6 +690,8 @@ impl AppConfig {
                     max_tokens: raw_p.max_tokens,
                     temperature: raw_p.temperature,
                     supports_tools: raw_p.supports_tools,
+                    max_retries: raw_p.max_retries,
+                    retry_delay_ms: raw_p.retry_delay_ms,
                 },
             );
         }
@@ -487,6 +721,8 @@ impl AppConfig {
             max_tokens: active_profile.max_tokens,
             temperature: active_profile.temperature,
             supports_tools: active_profile.supports_tools,
+            max_retries: active_profile.max_retries,
+            retry_delay_ms: active_profile.retry_delay_ms,
         };
 
         Ok(AppConfig {
@@ -495,9 +731,12 @@ impl AppConfig {
             llm_profiles,
             llm,
             tools: raw.tools,
+            security: raw.security,
+            limits: raw.limits,
             memory: raw.memory,
             heartbeat: raw.heartbeat,
             agent: raw.agent,
+            audit: raw.audit,
         })
     }
 }
