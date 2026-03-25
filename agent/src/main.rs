@@ -1,4 +1,5 @@
 mod agent;
+mod channel;
 mod config;
 mod llm;
 mod memory;

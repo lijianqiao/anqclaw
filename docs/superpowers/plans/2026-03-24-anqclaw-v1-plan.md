@@ -557,18 +557,26 @@ Phase 5 - AgentCore agentic loop 实现，含工具调用与上下文构建
 
 ## Phase 6: 飞书 Channel 实现
 
-**目标：** 飞书 REST API 封装 + WebSocket 连接管理 + FeishuChannel 实现。
+**目标：** 飞书 REST API 封装 + WebSocket 连接管理（Protobuf 帧协议）+ FeishuChannel 实现。
+
+> **重要变更（参考 zeroclaw/lark.rs）：** 飞书 WS 使用自定义 Protobuf 二进制帧协议（pbbp2），
+> 不是普通 JSON + WebSocket ping/pong。需要 `prost` 依赖编解码 `PbFrame`。
+
+**新增依赖：** `prost = "0.13"`, `futures-util = "0.3"`
 
 **Files:**
+- Modify: `agent/Cargo.toml` (新增 prost, futures-util)
 - Create: `agent/src/channel/mod.rs`
 - Create: `agent/src/channel/feishu/mod.rs`
 - Create: `agent/src/channel/feishu/types.rs`
 - Create: `agent/src/channel/feishu/api.rs`
 - Create: `agent/src/channel/feishu/ws.rs`
 
-### Task 6.1: Channel trait + 飞书事件类型
+### Task 6.1: Channel trait + 飞书事件类型 + Protobuf 帧定义
 
-- [ ] **Step 1: 创建 `src/channel/mod.rs`**
+- [ ] **Step 1: 新增 `prost` 和 `futures-util` 依赖到 Cargo.toml**
+
+- [ ] **Step 2: 创建 `src/channel/mod.rs`**
 
 定义 `Channel` trait（object-safe）：
 
@@ -588,44 +596,57 @@ pub trait Channel: Send + Sync + 'static {
 }
 ```
 
-- [ ] **Step 2: 创建 `src/channel/feishu/types.rs`**
+- [ ] **Step 3: 创建 `src/channel/feishu/types.rs`**
 
-定义飞书 WebSocket 事件 JSON 反序列化结构体：
-- `FeishuWsEvent`: 顶层事件包装
-- `FeishuMessageEvent`: `im.message.receive_v1` 事件体
-- `FeishuMessageContent`: 消息内容（text/image/file/post）
-- 实现 `FeishuMessageEvent → InboundMessage` 转换
+定义：
+- `PbHeader` / `PbFrame` — Protobuf WS 帧（`#[derive(prost::Message)]`）
+  - method=0 → CONTROL (ping/pong), method=1 → DATA (events)
+- `WsEndpointResp` / `WsEndpoint` / `WsClientConfig` — WS endpoint 响应
+- `LarkEvent` / `LarkEventHeader` — 事件信封
+- `MsgReceivePayload` / `LarkSender` / `LarkSenderId` / `LarkMessage` — im.message.receive_v1 事件体
+- 实现 `MsgReceivePayload → InboundMessage` 转换（按 message_type 解析 text/image/file/post）
 
 ### Task 6.2: 飞书 REST API 封装
 
 - [ ] **Step 1: 创建 `src/channel/feishu/api.rs`**
 
-实现 `FeishuApi`（参考设计规格书 §5）：
+实现 `FeishuApi`：
 - `new(config: &FeishuSection) -> Self`
-- `ensure_token() -> Result<String>`: RwLock 缓存 token，过期前 5 分钟刷新
-- `get_ws_endpoint() -> Result<String>`: `POST /callback/ws/endpoint`
-- `send_text(chat_id, text) -> Result<()>`: `POST /im/v1/messages`
-- `reply_text(message_id, text) -> Result<()>`: `POST /im/v1/messages/{id}/reply`
+- `get_tenant_access_token() -> Result<String>`: RwLock 缓存 token，TTL 提前 120s 刷新
+- `invalidate_token()`: 主动清除缓存（401 时调用）
+- `get_ws_endpoint() -> Result<(String, WsClientConfig)>`:
+  - `POST https://open.feishu.cn/callback/ws/endpoint` (直接用 AppID+AppSecret，不需要 token)
+- `send_card(chat_id, markdown) -> Result<()>`: 发送 Interactive Card（Markdown 渲染）
+- `reply_card(message_id, markdown) -> Result<()>`: 回复 Interactive Card
+- 长消息自动分片发送（LARK_CARD_MARKDOWN_MAX_BYTES = 28000）
 
 Token 刷新：`POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal`
+401/invalid_token 自动重试：invalidate → refresh → retry
 
-- [ ] **Step 2: 运行 `cargo check`**
-
-### Task 6.3: 飞书 WebSocket 连接管理
+### Task 6.3: 飞书 WebSocket 连接管理（Protobuf 帧协议）
 
 - [ ] **Step 1: 创建 `src/channel/feishu/ws.rs`**
 
-实现 WebSocket 连接循环：
-- `connect_and_listen(api, tx, allow_from) -> Result<()>`:
-  1. 调用 `api.get_ws_endpoint()` 获取 WS URL
-  2. `tokio_tungstenite::connect_async()` 连接
-  3. 消息循环：
-     - Text message → 解析为 `FeishuWsEvent` → 白名单检查 → 转为 `InboundMessage` → `tx.send()`
-     - Ping → 回复 Pong
-  4. 连接断开 → 返回错误触发重连
+实现 WebSocket 连接循环（参考 zeroclaw `listen_ws`）：
+- `listen_ws(api, tx, allow_from) -> Result<()>`:
+  1. 调用 `api.get_ws_endpoint()` → (wss_url, client_config)
+  2. `tokio_tungstenite::connect_async(wss_url)` 连接
+  3. 发送初始 ping（PbFrame method=0, type=ping）
+  4. `tokio::select!` 主循环：
+     - **ping 定时器**：按 `client_config.ping_interval`（默认 120s）发送 protobuf ping 帧
+     - **heartbeat 超时检测**：300s 无数据 → 断开重连
+     - **WS 消息接收**：
+       - Binary → `PbFrame::decode` → 分 CONTROL/DATA 处理
+       - CONTROL (method=0, type=pong) → 解析 payload 更新 ping_interval
+       - DATA (method=1) → **立即发送 ACK 帧**（3 秒内）→ 分片重组 → 解析事件
+       - 事件类型 `im.message.receive_v1` → 白名单校验 → 去重 → 解析消息内容 → `tx.send()`
+       - Ping/Close → 对应处理
+
+- **分片重组**：大消息通过 `sum`/`seq` header 分多帧发送，需缓存合并
+- **消息去重**：维护 `seen_ids: HashMap<String, Instant>`，30 分钟窗口
 
 - `run_with_reconnect(api, tx, allow_from)`:
-  - 外层循环：调用 `connect_and_listen`
+  - 外层循环：调用 `listen_ws`
   - 失败后指数退避重连（1s, 2s, 4s, 8s... 最大 60s）
   - 成功连接后重置退避计数
 
@@ -636,10 +657,8 @@ Token 刷新：`POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_toke
 实现 `FeishuChannel` 结构体，组装 api + ws：
 - `new(config: &FeishuSection) -> Self`
 - 实现 `Channel::start()`: 启动 `ws::run_with_reconnect`
-- 实现 `Channel::send_message()`: 根据 `reply_to` 调用 `api.reply_text()` 或 `api.send_text()`
+- 实现 `Channel::send_message()`: 调用 `api.send_card()` 或 `api.reply_card()`
 - 实现 `Channel::name() -> "feishu"`
-
-- [ ] **Step 2: 运行 `cargo check`**
 
 ### ✅ Phase 6 验收
 
@@ -649,9 +668,9 @@ Token 刷新：`POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_toke
 
 **Commit 示例：**
 ```
-feat(phase6): Feishu channel with WebSocket, REST API and auto-reconnect
+feat(phase6): Feishu channel with Protobuf WS, REST API and auto-reconnect
 
-Phase 6 - 飞书 Channel 实现，含 WebSocket 连接、REST API 与自动重连
+Phase 6 - 飞书 Channel 实现，Protobuf 二进制帧协议 + Interactive Card + 自动重连
 ```
 
 ---

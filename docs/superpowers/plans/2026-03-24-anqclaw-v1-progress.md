@@ -16,7 +16,7 @@
 | Phase 3 | LLM 抽象层 + 两个 Client | - [x] 已完成 | 2026-03-24 | LlmClient trait + Anthropic + OpenAI-compat |
 | Phase 4 | Tool Registry + 6 个内置工具 | - [x] 已完成 | 2026-03-24 | 6 工具 + 路径沙箱 + shell 白名单 + 并发执行 |
 | Phase 5 | Agent Core — Agentic Loop | - [x] 已完成 | 2026-03-25 | 3 个 mock 测试通过 |
-| Phase 6 | 飞书 Channel 实现 | - [ ] 未开始 | | |
+| Phase 6 | 飞书 Channel 实现 | - [x] 已完成 | 2026-03-25 | Protobuf 帧协议 + Interactive Card + 自动重连 |
 | Phase 7 | Gateway 消息路由 | - [ ] 未开始 | | |
 | Phase 8 | Heartbeat 定时任务 | - [ ] 未开始 | | |
 | Phase 9 | 主入口 + Workspace + 优雅关机 | - [ ] 未开始 | | |
@@ -91,10 +91,10 @@
 
 | Task | 内容 | 状态 | 备注 |
 |------|------|------|------|
-| 6.1 | Channel trait + 飞书事件类型 | - [ ] 未完成 | |
-| 6.2 | 飞书 REST API 封装 | - [ ] 未完成 | |
-| 6.3 | 飞书 WebSocket 连接管理 | - [ ] 未完成 | |
-| 6.4 | FeishuChannel 组装 | - [ ] 未完成 | |
+| 6.1 | Channel trait + Protobuf 帧 + 事件类型 | - [x] 已完成 | PbFrame/PbHeader prost 定义 + LarkEvent 反序列化 + 消息转换 |
+| 6.2 | 飞书 REST API 封装 | - [x] 已完成 | Token 缓存 + WS endpoint + Interactive Card 发送 + 401 重试 |
+| 6.3 | 飞书 WebSocket 连接管理 | - [x] 已完成 | Protobuf ping/pong + 3s ACK + 分片重组 + 去重 + 心跳超时 |
+| 6.4 | FeishuChannel 组装 | - [x] 已完成 | Channel trait 实现 + 指数退避自动重连 |
 
 **阶段完成标志:** `cargo check` 通过，Channel trait 实现完整
 
@@ -153,3 +153,4 @@
 | 2026-03-24 | Phase 3 完成：LlmClient trait + Anthropic/OpenAI-compat 双端实现 |
 | 2026-03-24 | Phase 4 完成：Tool trait + ToolRegistry + 6 个内置工具（shell/web/file/memory） |
 | 2026-03-25 | Phase 5 完成：AgentCore agentic loop + context 构建 + 3 个 mock 测试 |
+| 2026-03-25 | Phase 6 完成：飞书 Channel（Protobuf WS + REST API + Interactive Card + 自动重连） |
