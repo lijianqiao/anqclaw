@@ -15,7 +15,7 @@
 | Phase 2 | Memory Store（SQLite） | - [x] 已完成 | 2026-03-24 | trigram tokenizer 支持中文子串搜索 |
 | Phase 3 | LLM 抽象层 + 两个 Client | - [x] 已完成 | 2026-03-24 | LlmClient trait + Anthropic + OpenAI-compat |
 | Phase 4 | Tool Registry + 6 个内置工具 | - [x] 已完成 | 2026-03-24 | 6 工具 + 路径沙箱 + shell 白名单 + 并发执行 |
-| Phase 5 | Agent Core — Agentic Loop | - [ ] 未开始 | | |
+| Phase 5 | Agent Core — Agentic Loop | - [x] 已完成 | 2026-03-25 | 3 个 mock 测试通过 |
 | Phase 6 | 飞书 Channel 实现 | - [ ] 未开始 | | |
 | Phase 7 | Gateway 消息路由 | - [ ] 未开始 | | |
 | Phase 8 | Heartbeat 定时任务 | - [ ] 未开始 | | |
@@ -80,8 +80,8 @@
 
 | Task | 内容 | 状态 | 备注 |
 |------|------|------|------|
-| 5.1 | System prompt 构建 | - [ ] 未完成 | |
-| 5.2 | AgentCore agentic loop | - [ ] 未完成 | |
+| 5.1 | System prompt 构建 | - [x] 已完成 | prompt.rs 默认 prompt + context.rs workspace 文件加载 |
+| 5.2 | AgentCore agentic loop | - [x] 已完成 | 3 个 mock 测试通过：纯文本 / tool loop / max rounds |
 
 **阶段完成标志:** 3 个单元测试通过（纯文本、tool loop、max rounds）
 
@@ -152,3 +152,4 @@
 | 2026-03-24 | Phase 2 完成：SQLite MemoryStore，WAL + trigram FTS5，6 个测试全通过 |
 | 2026-03-24 | Phase 3 完成：LlmClient trait + Anthropic/OpenAI-compat 双端实现 |
 | 2026-03-24 | Phase 4 完成：Tool trait + ToolRegistry + 6 个内置工具（shell/web/file/memory） |
+| 2026-03-25 | Phase 5 完成：AgentCore agentic loop + context 构建 + 3 个 mock 测试 |
