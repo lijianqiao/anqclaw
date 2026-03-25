@@ -2,11 +2,6 @@
 
 anqclaw 是一个用 Rust 构建的私人 AI 助理，支持飞书接入、CLI 对话、多 LLM、工具调用与持久记忆。
 
-## 当前版本
-
-- 版本：v0.2.0
-- 状态：v1 + v2 计划能力已完成
-
 ## 核心能力
 
 - 多 LLM Profile（Anthropic / OpenAI-compatible / Ollama 等）

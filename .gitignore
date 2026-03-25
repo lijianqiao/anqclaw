@@ -3,3 +3,7 @@ agent/target/
 agent/data/
 agent/config.toml
 agent/workspace/
+CLAUDE.md
+.github/
+.vscode/
+.idea/

@@ -8,6 +8,8 @@ mod heartbeat;
 mod llm;
 mod memory;
 mod paths;
+mod scheduler;
+mod skill;
 mod tool;
 mod types;
 
@@ -20,11 +22,13 @@ use crate::agent::AgentCore;
 use crate::channel::Channel;
 use crate::channel::cli::CliChannel;
 use crate::channel::feishu::FeishuChannel;
+use crate::channel::http::HttpChannel;
 use crate::gateway::Gateway;
 use crate::heartbeat::Heartbeat;
 use crate::llm::create_llm_client;
 use crate::memory::MemoryStore;
 use crate::paths::{anqclaw_home, ensure_dirs, find_config, resolve_path};
+use crate::scheduler::Scheduler;
 use crate::tool::ToolRegistry;
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
@@ -74,21 +78,13 @@ async fn main() -> anyhow::Result<()> {
     let command = cli.command.unwrap_or(Commands::Serve);
 
     match command {
-        Commands::Onboard => {
-            cli::onboard::run_onboard()
-        }
-        Commands::Config { action } => {
-            match action {
-                ConfigAction::Show => cli::config_cmd::run_show(cli.config.as_deref()),
-                ConfigAction::Validate => cli::config_cmd::run_validate(cli.config.as_deref()),
-            }
-        }
-        Commands::Chat { message } => {
-            run_chat(cli.config, message).await
-        }
-        Commands::Serve => {
-            run_serve(cli.config).await
-        }
+        Commands::Onboard => cli::onboard::run_onboard(),
+        Commands::Config { action } => match action {
+            ConfigAction::Show => cli::config_cmd::run_show(cli.config.as_deref()),
+            ConfigAction::Validate => cli::config_cmd::run_validate(cli.config.as_deref()),
+        },
+        Commands::Chat { message } => run_chat(cli.config, message).await,
+        Commands::Serve => run_serve(cli.config).await,
     }
 }
 
@@ -99,6 +95,8 @@ struct Bootstrap {
     memory: Arc<MemoryStore>,
     agent: Arc<AgentCore>,
     #[allow(dead_code)]
+    skill_registry: Option<Arc<skill::SkillRegistry>>,
+    #[allow(dead_code)]
     home: std::path::PathBuf,
 }
 
@@ -107,8 +105,8 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
     ensure_dirs(&home)?;
 
     // Find and load configuration
-    let config_path = find_config(cli_config.as_deref())
-        .ok_or_else(|| anyhow::anyhow!(
+    let config_path = find_config(cli_config.as_deref()).ok_or_else(|| {
+        anyhow::anyhow!(
             "No config file found. Searched:\n  \
              1. --config <path>\n  \
              2. $ANQCLAW_CONFIG\n  \
@@ -116,7 +114,8 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
              4. {}\n\n\
              Run `anqclaw onboard` to create one.",
             home.join("config.toml").display()
-        ))?;
+        )
+    })?;
 
     let mut config = config::AppConfig::load(config_path.to_str().unwrap())?;
 
@@ -153,7 +152,9 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
         }
         let file_appender = tracing_appender::rolling::daily(
             log_path.parent().unwrap_or(std::path::Path::new(".")),
-            log_path.file_name().unwrap_or(std::ffi::OsStr::new("anqclaw.log")),
+            log_path
+                .file_name()
+                .unwrap_or(std::ffi::OsStr::new("anqclaw.log")),
         );
         Some(fmt::layer().json().with_writer(file_appender))
     } else {
@@ -176,7 +177,10 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
 
     // Initialize MemoryStore
     let memory = Arc::new(MemoryStore::new(&config.memory.db_path).await?);
-    tracing::info!(db = config.memory.db_path.as_str(), "memory store initialized");
+    tracing::info!(
+        db = config.memory.db_path.as_str(),
+        "memory store initialized"
+    );
 
     // Create LLM client
     let llm = create_llm_client(&config.llm);
@@ -220,11 +224,45 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
         None
     };
 
-    // Create ToolRegistry & AgentCore
-    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
-    let agent = Arc::new(AgentCore::new(llm, fallback_llm, tools, memory.clone(), config.clone(), audit_logger));
+    // Scan skills directory
+    let skill_registry = if config.skills.enabled {
+        let skills_dir = resolve_path(&home, &config.skills.skills_dir);
+        let registry = Arc::new(skill::SkillRegistry::scan(&skills_dir));
+        tracing::info!(
+            dir = %skills_dir.display(),
+            count = registry.list().len(),
+            "skills scanned"
+        );
+        Some(registry)
+    } else {
+        tracing::info!("skills disabled");
+        None
+    };
 
-    Ok(Bootstrap { config, memory, agent, home })
+    // Create ToolRegistry & AgentCore
+    let tools = Arc::new(ToolRegistry::new(
+        &config.tools,
+        &config.security,
+        memory.clone(),
+        skill_registry.clone(),
+    ));
+    let agent = Arc::new(AgentCore::new(
+        llm,
+        fallback_llm,
+        tools,
+        memory.clone(),
+        config.clone(),
+        audit_logger,
+        skill_registry.clone(),
+    ));
+
+    Ok(Bootstrap {
+        config,
+        memory,
+        agent,
+        skill_registry,
+        home,
+    })
 }
 
 // ─── `anqclaw serve` ────────────────────────────────────────────────────────
@@ -242,12 +280,24 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
         tracing::info!("feishu channel not configured — skipping");
     }
 
+    // HTTP channel (optional)
+    if bs.config.http_channel.enabled {
+        let http_channel: Arc<dyn Channel> = Arc::new(HttpChannel::new(&bs.config.http_channel));
+        channels.push(http_channel);
+        tracing::info!(bind = %bs.config.http_channel.bind, "http channel enabled");
+    }
+
     if channels.is_empty() {
-        tracing::warn!("no channels configured — only heartbeat will run (if enabled)");
+        tracing::warn!("no channels configured — only heartbeat/scheduler will run (if enabled)");
     }
 
     // Create & spawn Gateway
-    let gateway = Gateway::new(channels.clone(), bs.agent.clone(), bs.memory.clone(), bs.config.clone());
+    let gateway = Gateway::new(
+        channels.clone(),
+        bs.agent.clone(),
+        bs.memory.clone(),
+        bs.config.clone(),
+    );
     let gw = gateway.clone();
     let gateway_handle = tokio::spawn(async move {
         if let Err(e) = gw.run().await {
@@ -264,7 +314,10 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
             channels.clone(),
             &bs.config.app.workspace,
         );
-        tracing::info!(interval_mins = bs.config.heartbeat.interval_minutes, "heartbeat enabled");
+        tracing::info!(
+            interval_mins = bs.config.heartbeat.interval_minutes,
+            "heartbeat enabled"
+        );
         Some(tokio::spawn(async move {
             if let Err(e) = hb.run().await {
                 tracing::error!(error = %e, "heartbeat exited with error");
@@ -272,6 +325,26 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
         }))
     } else {
         tracing::info!("heartbeat disabled");
+        None
+    };
+
+    // Spawn Scheduler (if enabled)
+    let scheduler_handle = if bs.config.scheduler.enabled {
+        let sched = Scheduler::new(
+            &bs.config.scheduler.tasks,
+            bs.agent.clone(),
+            bs.memory.clone(),
+            channels.clone(),
+            &bs.home,
+        );
+        tracing::info!(task_count = sched.task_count(), "scheduler enabled");
+        Some(tokio::spawn(async move {
+            if let Err(e) = sched.run().await {
+                tracing::error!(error = %e, "scheduler exited with error");
+            }
+        }))
+    } else {
+        tracing::info!("scheduler disabled");
         None
     };
 
@@ -284,6 +357,9 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
     gateway_handle.abort();
     if let Some(hb) = heartbeat_handle {
         hb.abort();
+    }
+    if let Some(sh) = scheduler_handle {
+        sh.abort();
     }
 
     tracing::info!("waiting for in-flight tasks to finish (max 30s)...");
@@ -308,7 +384,12 @@ async fn run_chat(cli_config: Option<String>, message: Option<String>) -> anyhow
     let cli_channel: Arc<dyn Channel> = Arc::new(CliChannel::new(message));
     let channels: Vec<Arc<dyn Channel>> = vec![cli_channel];
 
-    let gateway = Gateway::new(channels, bs.agent.clone(), bs.memory.clone(), bs.config.clone());
+    let gateway = Gateway::new(
+        channels,
+        bs.agent.clone(),
+        bs.memory.clone(),
+        bs.config.clone(),
+    );
 
     if is_single_shot {
         // Single-shot: run gateway, wait for it to complete, exit

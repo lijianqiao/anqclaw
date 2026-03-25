@@ -174,6 +174,24 @@ fn default_log_file_writes() -> bool {
 fn default_log_llm_calls() -> bool {
     false
 }
+fn default_skills_enabled() -> bool {
+    true
+}
+fn default_skills_dir() -> String {
+    "skills".to_string()
+}
+fn default_max_active_skills() -> u32 {
+    3
+}
+fn default_session_key_strategy() -> String {
+    "chat".to_string()
+}
+fn default_scheduler_enabled() -> bool {
+    false
+}
+fn default_http_bind() -> String {
+    "127.0.0.1:3000".to_string()
+}
 
 // ─── Audit section ───────────────────────────────────────────────────────────
 
@@ -185,8 +203,10 @@ pub struct AuditSection {
     pub log_file: String,
     #[serde(default = "default_log_tool_calls")]
     pub log_tool_calls: bool,
+    #[allow(dead_code)]
     #[serde(default = "default_log_shell_commands")]
     pub log_shell_commands: bool,
+    #[allow(dead_code)]
     #[serde(default = "default_log_file_writes")]
     pub log_file_writes: bool,
     #[serde(default = "default_log_llm_calls")]
@@ -206,6 +226,91 @@ impl Default for AuditSection {
     }
 }
 
+// ─── Skills section ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SkillsSection {
+    #[serde(default = "default_skills_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_skills_dir")]
+    pub skills_dir: String,
+    #[allow(dead_code)]
+    #[serde(default = "default_max_active_skills")]
+    pub max_active_skills: u32,
+}
+
+impl Default for SkillsSection {
+    fn default() -> Self {
+        Self {
+            enabled: default_skills_enabled(),
+            skills_dir: default_skills_dir(),
+            max_active_skills: default_max_active_skills(),
+        }
+    }
+}
+
+// ─── HTTP channel section ────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct HttpChannelSection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_http_bind")]
+    pub bind: String,
+    /// Bearer token for authentication. If empty, no auth is required.
+    #[serde(default)]
+    pub bearer_token: String,
+}
+
+impl Default for HttpChannelSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_http_bind(),
+            bearer_token: String::new(),
+        }
+    }
+}
+
+// ─── Scheduler section ──────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SchedulerTaskConfig {
+    pub name: String,
+    pub cron: String,
+    #[serde(default)]
+    pub prompt_file: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default = "default_notify_channel")]
+    pub notify_channel: String,
+    #[serde(default)]
+    pub notify_chat_id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SchedulerSection {
+    #[serde(default = "default_scheduler_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub tasks: Vec<SchedulerTaskConfig>,
+}
+
+impl Default for SchedulerSection {
+    fn default() -> Self {
+        Self {
+            enabled: default_scheduler_enabled(),
+            tasks: vec![],
+        }
+    }
+}
+
 // ─── Raw deserialization structs (secrets as plain String) ────────────────────
 
 #[derive(Deserialize)]
@@ -219,6 +324,8 @@ struct RawFeishuSection {
 #[derive(Deserialize, Default)]
 struct RawChannelSection {
     pub feishu: Option<RawFeishuSection>,
+    #[serde(default)]
+    pub http: Option<HttpChannelSection>,
 }
 
 /// Raw LLM profile — flat format (used in single-profile legacy mode and per-profile).
@@ -269,9 +376,7 @@ struct RawLlmProfile {
 /// Detection: if the TOML `[llm]` value has a `provider` key, it's legacy (flat).
 /// Otherwise it's multi-profile.
 fn parse_llm_profiles(llm_value: &toml::Value) -> Result<HashMap<String, RawLlmProfile>> {
-    let table = llm_value
-        .as_table()
-        .context("[llm] must be a TOML table")?;
+    let table = llm_value.as_table().context("[llm] must be a TOML table")?;
 
     // Detect: if it has a "provider" or "model" or "api_key" key at the top level,
     // treat as legacy single profile → wrap as { "default": ... }
@@ -280,8 +385,9 @@ fn parse_llm_profiles(llm_value: &toml::Value) -> Result<HashMap<String, RawLlmP
         || table.contains_key("api_key");
 
     if is_legacy {
-        let profile: RawLlmProfile =
-            toml::Value::Table(table.clone()).try_into().context("parse [llm] as flat profile")?;
+        let profile: RawLlmProfile = toml::Value::Table(table.clone())
+            .try_into()
+            .context("parse [llm] as flat profile")?;
         let mut map = HashMap::new();
         map.insert("default".to_string(), profile);
         Ok(map)
@@ -289,8 +395,10 @@ fn parse_llm_profiles(llm_value: &toml::Value) -> Result<HashMap<String, RawLlmP
         // Multi-profile: each key is a profile name
         let mut map = HashMap::new();
         for (name, value) in table {
-            let profile: RawLlmProfile =
-                value.clone().try_into().with_context(|| format!("parse [llm.{name}]"))?;
+            let profile: RawLlmProfile = value
+                .clone()
+                .try_into()
+                .with_context(|| format!("parse [llm.{name}]"))?;
             map.insert(name.clone(), profile);
         }
         if map.is_empty() {
@@ -325,6 +433,10 @@ struct RawAppConfig {
     pub agent: AgentSection,
     #[serde(default)]
     pub audit: AuditSection,
+    #[serde(default)]
+    pub skills: SkillsSection,
+    #[serde(default)]
+    pub scheduler: SchedulerSection,
 }
 
 // ─── Public config structs ────────────────────────────────────────────────────
@@ -450,6 +562,8 @@ pub struct MemorySection {
     pub history_limit: u32,
     #[serde(default = "default_search_limit")]
     pub search_limit: u32,
+    #[serde(default = "default_session_key_strategy")]
+    pub session_key_strategy: String,
 }
 
 impl Default for MemorySection {
@@ -458,6 +572,7 @@ impl Default for MemorySection {
             db_path: default_db_path(),
             history_limit: default_history_limit(),
             search_limit: default_search_limit(),
+            session_key_strategy: default_session_key_strategy(),
         }
     }
 }
@@ -595,6 +710,8 @@ pub struct AppConfig {
     pub app: AppSection,
     /// `None` if `[feishu]` / `[channel.feishu]` is omitted from config — Feishu channel won't start.
     pub feishu: Option<FeishuSection>,
+    /// HTTP channel settings.
+    pub http_channel: HttpChannelSection,
     /// Named LLM profiles. At least one ("default") is required.
     pub llm_profiles: HashMap<String, LlmSection>,
     /// Convenience accessor: the active LLM profile (determined by `agent.llm_profile`).
@@ -607,6 +724,8 @@ pub struct AppConfig {
     pub heartbeat: HeartbeatSection,
     pub agent: AgentSection,
     pub audit: AuditSection,
+    pub skills: SkillsSection,
+    pub scheduler: SchedulerSection,
 }
 
 // ─── Env-var resolution ───────────────────────────────────────────────────────
@@ -657,10 +776,13 @@ impl AppConfig {
 
         // --- Feishu (optional) ---
         // [channel.feishu] takes precedence over legacy [feishu]
-        let raw_feishu = raw
+        let http_channel = raw
             .channel
-            .and_then(|c| c.feishu)
-            .or(raw.feishu);
+            .as_ref()
+            .and_then(|c| c.http.clone())
+            .unwrap_or_default();
+
+        let raw_feishu = raw.channel.and_then(|c| c.feishu).or(raw.feishu);
         let feishu = match raw_feishu {
             Some(f) => {
                 let app_secret_str = resolve_env(&f.app_secret, "feishu.app_secret")?;
@@ -678,8 +800,7 @@ impl AppConfig {
         let mut llm_profiles = HashMap::new();
 
         for (name, raw_p) in &raw_profiles {
-            let api_key_str =
-                resolve_env_optional(&raw_p.api_key);
+            let api_key_str = resolve_env_optional(&raw_p.api_key);
             llm_profiles.insert(
                 name.clone(),
                 LlmSection {
@@ -698,16 +819,14 @@ impl AppConfig {
 
         // Determine active profile
         let active_profile_name = &raw.agent.llm_profile;
-        let active_profile = llm_profiles
-            .get(active_profile_name)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "agent.llm_profile = \"{}\" but no [llm.{}] profile found. Available: {:?}",
-                    active_profile_name,
-                    active_profile_name,
-                    llm_profiles.keys().collect::<Vec<_>>()
-                )
-            })?;
+        let active_profile = llm_profiles.get(active_profile_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "agent.llm_profile = \"{}\" but no [llm.{}] profile found. Available: {:?}",
+                active_profile_name,
+                active_profile_name,
+                llm_profiles.keys().collect::<Vec<_>>()
+            )
+        })?;
 
         // Clone active profile into the convenience `llm` field
         let llm = LlmSection {
@@ -728,6 +847,7 @@ impl AppConfig {
         Ok(AppConfig {
             app: raw.app,
             feishu,
+            http_channel,
             llm_profiles,
             llm,
             tools: raw.tools,
@@ -737,6 +857,8 @@ impl AppConfig {
             heartbeat: raw.heartbeat,
             agent: raw.agent,
             audit: raw.audit,
+            skills: raw.skills,
+            scheduler: raw.scheduler,
         })
     }
 }

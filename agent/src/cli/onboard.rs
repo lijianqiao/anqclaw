@@ -194,6 +194,9 @@ pub fn run_onboard() -> anyhow::Result<()> {
     // Generate workspace templates
     generate_workspace_templates(&home.join("workspace"))?;
 
+    // Generate example skill files
+    generate_example_skills(&home.join("skills"))?;
+
     println!();
     println!("\x1b[1;32m✅ 配置完成！\x1b[0m");
     println!();
@@ -267,7 +270,8 @@ fn generate_config(
 
     s.push_str("[memory]\n");
     s.push_str("history_limit = 20\n");
-    s.push_str("search_limit = 5\n\n");
+    s.push_str("search_limit = 5\n");
+    s.push_str("# session_key_strategy = \"chat\"  # Options: chat, user, chat_user\n\n");
 
     s.push_str("[agent]\n");
     s.push_str("max_tool_rounds = 10\n");
@@ -284,7 +288,12 @@ fn generate_config(
     s.push_str("log_tool_calls = true\n");
     s.push_str("log_shell_commands = true\n");
     s.push_str("log_file_writes = true\n");
-    s.push_str("log_llm_calls = false\n");
+    s.push_str("log_llm_calls = false\n\n");
+
+    s.push_str("[skills]\n");
+    s.push_str("enabled = true\n");
+    s.push_str("skills_dir = \"skills\"\n");
+    s.push_str("max_active_skills = 3\n");
 
     s
 }
@@ -395,3 +404,101 @@ const TMPL_USER: &str = r#"# 用户画像
 const TMPL_MEMORY: &str = "# 预置记忆\n\n<!-- 在此填写启动时加载的重要事实，每次构建 system prompt 时会读取 -->\n";
 
 const TMPL_HEARTBEAT: &str = "# Heartbeat\n\n<!-- 定时任务 prompt：每次 heartbeat tick 时读取此文件 -->\n<!-- 如果 LLM 回复包含 \"HEARTBEAT_OK\" 则不通知用户 -->\n<!-- 留空或删除此文件则跳过 heartbeat -->\n";
+
+// ─── Example skill templates ────────────────────────────────────────────────
+
+fn generate_example_skills(skills_dir: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(skills_dir)?;
+
+    let skills: &[(&str, &str)] = &[
+        ("code-review.md", SKILL_CODE_REVIEW),
+        ("git-workflow.md", SKILL_GIT_WORKFLOW),
+        ("summarize.md", SKILL_SUMMARIZE),
+    ];
+
+    for (name, content) in skills {
+        let path = skills_dir.join(name);
+        if !path.exists() {
+            std::fs::write(&path, content)?;
+            println!("  → skills/{name} ✓");
+        } else {
+            println!("  → skills/{name} (已存在，跳过)");
+        }
+    }
+
+    Ok(())
+}
+
+const SKILL_CODE_REVIEW: &str = r#"---
+name: code-review
+description: 专业代码审查，关注安全、性能、可维护性
+trigger: 代码审查、review、CR、帮我看看这段代码、code review
+---
+
+你是一位资深代码审查专家。请按以下维度审查用户提供的代码：
+
+## 审查维度
+
+1. **安全性** — SQL 注入、XSS、敏感信息泄露、命令注入
+2. **性能** — N+1 查询、不必要的拷贝、算法复杂度、内存泄漏
+3. **可维护性** — 命名规范、职责单一、代码重复、测试覆盖
+4. **正确性** — 边界条件、错误处理、并发安全、类型安全
+
+## 输出格式
+
+对每个发现的问题，按以下格式输出：
+
+- **[严重度: 高/中/低]** 问题描述
+  - 位置：文件名:行号
+  - 建议：具体的修复方案
+
+最后给出整体评价和改进建议的优先级排序。
+"#;
+
+const SKILL_GIT_WORKFLOW: &str = r#"---
+name: git-workflow
+description: Git 工作流指导和常见操作帮助
+trigger: git、分支、merge、rebase、cherry-pick、冲突、commit
+---
+
+你是 Git 工作流专家。帮助用户解决 Git 相关问题。
+
+## 能力范围
+
+- 分支管理策略（Git Flow, Trunk-based）
+- 合并冲突解决
+- 交互式 rebase 指导
+- Cherry-pick 和回滚操作
+- Commit message 规范（Conventional Commits）
+- Git hooks 配置
+
+## 回复原则
+
+- 先理解用户当前的 Git 状态和目标
+- 给出具体的命令序列，每步加注释说明
+- 提醒潜在风险（如 force push、数据丢失）
+- 优先推荐安全的操作方式
+"#;
+
+const SKILL_SUMMARIZE: &str = r#"---
+name: summarize
+description: 内容总结与要点提取
+trigger: 总结、摘要、概括、帮我整理、要点、summarize、summary、TL;DR
+---
+
+你是内容总结专家。将用户提供的内容精炼为结构化摘要。
+
+## 总结框架
+
+1. **一句话总结** — 核心观点/结论
+2. **关键要点** — 3-5 个要点，每个不超过两句话
+3. **重要细节** — 数据、引用、关键论据
+4. **行动建议** — 基于内容的下一步建议（如适用）
+
+## 原则
+
+- 保留原文的关键数据和事实
+- 区分事实陈述和观点判断
+- 中文内容用中文总结，英文内容用中文总结但保留关键术语
+- 长文档可按章节分段总结
+"#;

@@ -5,6 +5,7 @@
 
 pub mod cli;
 pub mod feishu;
+pub mod http;
 
 use anyhow::Result;
 use std::future::Future;

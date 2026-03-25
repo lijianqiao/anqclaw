@@ -105,11 +105,25 @@ impl Gateway {
         Ok(())
     }
 
+    /// Compute the session key for history lookup/storage based on config strategy.
+    /// - "chat" (default): use chat_id only (group chats share history)
+    /// - "user": use sender_id only (each user has own global history)
+    /// - "chat_user": use "chat_id::sender_id" (per-user history within each chat)
+    fn session_key(&self, msg: &InboundMessage) -> String {
+        match self.config.memory.session_key_strategy.as_str() {
+            "user" => msg.sender_id.clone(),
+            "chat_user" => format!("{}::{}", msg.chat_id, msg.sender_id),
+            _ => msg.chat_id.clone(), // "chat" is default
+        }
+    }
+
     async fn process_message(&self, msg: InboundMessage) {
+        let session_key = self.session_key(&msg);
+
         // Per-chat lock: serialise processing within the same conversation
         let lock = self
             .chat_locks
-            .entry(msg.chat_id.clone())
+            .entry(session_key.clone())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _guard = lock.lock().await;
@@ -124,7 +138,7 @@ impl Gateway {
         // 1. Load history from SQLite
         let history = self
             .memory
-            .get_history(&msg.chat_id, self.config.memory.history_limit as usize)
+            .get_history(&session_key, self.config.memory.history_limit as usize)
             .await
             .unwrap_or_else(|e| {
                 tracing::error!(error = %e, "failed to load history");
@@ -138,7 +152,7 @@ impl Gateway {
         if !persist_messages.is_empty()
             && let Err(e) = self
                 .memory
-                .save_conversation(&msg.chat_id, &persist_messages)
+                .save_conversation(&session_key, &persist_messages)
                 .await
         {
             tracing::error!(error = %e, "failed to save conversation");

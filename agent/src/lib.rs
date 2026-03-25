@@ -8,5 +8,7 @@ pub mod heartbeat;
 pub mod llm;
 pub mod memory;
 pub mod paths;
+pub mod scheduler;
+pub mod skill;
 pub mod tool;
 pub mod types;

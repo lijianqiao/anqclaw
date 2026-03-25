@@ -15,6 +15,7 @@ use crate::audit::AuditLogger;
 use crate::config::AppConfig;
 use crate::llm::LlmClient;
 use crate::memory::MemoryStore;
+use crate::skill::SkillRegistry;
 use crate::tool::ToolRegistry;
 use crate::types::{ChatMessage, InboundMessage, OutboundMessage};
 
@@ -31,6 +32,7 @@ pub struct AgentCore {
     /// Cached secret values for redaction
     secrets: Vec<String>,
     audit: Option<Arc<AuditLogger>>,
+    skill_registry: Option<Arc<SkillRegistry>>,
 }
 
 impl AgentCore {
@@ -41,6 +43,7 @@ impl AgentCore {
         memory: Arc<MemoryStore>,
         config: Arc<AppConfig>,
         audit: Option<Arc<AuditLogger>>,
+        skill_registry: Option<Arc<SkillRegistry>>,
     ) -> Self {
         let secrets = if config.security.auto_redact_secrets {
             redact::collect_secrets(&config)
@@ -55,6 +58,7 @@ impl AgentCore {
             config,
             secrets,
             audit,
+            skill_registry,
         }
     }
 
@@ -82,8 +86,12 @@ impl AgentCore {
         msg: &InboundMessage,
         history: &[ChatMessage],
     ) -> Result<(OutboundMessage, Vec<ChatMessage>)> {
-        // 1. Build system prompt
-        let system_prompt = build_system_prompt(&self.config);
+        // 1. Build system prompt (with skill summaries if available)
+        let skill_summary = self.skill_registry
+            .as_ref()
+            .map(|r| r.build_summary())
+            .unwrap_or_default();
+        let system_prompt = build_system_prompt(&self.config, &skill_summary);
 
         // 2. Search relevant memories
         let user_text = msg.content.to_text();
@@ -339,8 +347,8 @@ max_tool_rounds = 3
             tool_calls: vec![],
         }]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None);
+        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
 
         let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
 
@@ -372,8 +380,8 @@ max_tool_rounds = 3
             },
         ]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None);
+        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
 
         let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
 
@@ -397,8 +405,8 @@ max_tool_rounds = 3
             }],
         }]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone()));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None);
+        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
 
         let (reply, _persist) = agent.handle(&test_inbound(), &[]).await;
 

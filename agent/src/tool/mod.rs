@@ -7,6 +7,7 @@
 pub mod file;
 pub mod memory_tool;
 pub mod shell;
+pub mod skill_tool;
 pub mod web;
 
 use anyhow::Result;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 
 use crate::config::{SecuritySection, ToolsSection};
 use crate::memory::MemoryStore;
+use crate::skill::SkillRegistry;
 use crate::types::{ToolCall, ToolDefinition, ToolResult};
 
 // ─── Tool Trait ──────────────────────────────────────────────────────────────
@@ -50,7 +52,12 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     /// Creates a registry and registers tools based on config toggles.
-    pub fn new(config: &ToolsSection, security: &SecuritySection, memory_store: Arc<MemoryStore>) -> Self {
+    pub fn new(
+        config: &ToolsSection,
+        security: &SecuritySection,
+        memory_store: Arc<MemoryStore>,
+        skill_registry: Option<Arc<SkillRegistry>>,
+    ) -> Self {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
 
         if config.shell_enabled {
@@ -102,6 +109,14 @@ impl ToolRegistry {
             );
             tools.insert(save_tool.name().to_string(), Arc::new(save_tool));
             tools.insert(search_tool.name().to_string(), Arc::new(search_tool));
+        }
+
+        // Register activate_skill tool if skills are available
+        if let Some(registry) = skill_registry {
+            if !registry.list().is_empty() {
+                let t = skill_tool::ActivateSkill::new(registry);
+                tools.insert(t.name().to_string(), Arc::new(t));
+            }
         }
 
         tracing::info!(
