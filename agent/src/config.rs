@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -8,7 +10,7 @@ fn default_app_name() -> String {
     "anqclaw".to_string()
 }
 fn default_workspace() -> String {
-    "./workspace".to_string()
+    "workspace".to_string()
 }
 fn default_log_level() -> String {
     "info".to_string()
@@ -31,8 +33,11 @@ fn default_max_tokens() -> u32 {
 fn default_temperature() -> f32 {
     0.7
 }
+fn default_supports_tools() -> bool {
+    true
+}
 fn default_db_path() -> String {
-    "./data/memory.db".to_string()
+    "data/memory.db".to_string()
 }
 fn default_history_limit() -> u32 {
     20
@@ -81,7 +86,7 @@ fn default_file_enabled() -> bool {
     true
 }
 fn default_file_access_dir() -> String {
-    "./workspace".to_string()
+    "workspace".to_string()
 }
 fn default_memory_tool_enabled() -> bool {
     true
@@ -95,11 +100,12 @@ fn default_max_tool_rounds() -> u32 {
 fn default_system_prompt_file() -> String {
     String::new()
 }
+fn default_llm_profile() -> String {
+    "default".to_string()
+}
 
 // ─── Raw deserialization structs (secrets as plain String) ────────────────────
 
-/// Intermediate struct for TOML deserialization — secrets stored as plain String
-/// so we can inspect them for `${VAR}` substitution before wrapping in SecretString.
 #[derive(Deserialize)]
 struct RawFeishuSection {
     pub app_id: String,
@@ -108,12 +114,14 @@ struct RawFeishuSection {
     pub allow_from: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct RawLlmSection {
+/// Raw LLM profile — flat format (used in single-profile legacy mode and per-profile).
+#[derive(Deserialize, Clone)]
+struct RawLlmProfile {
     #[serde(default = "default_llm_provider")]
     pub provider: String,
     #[serde(default = "default_llm_model")]
     pub model: String,
+    #[serde(default)]
     pub api_key: String,
     #[serde(default = "default_base_url")]
     pub base_url: String,
@@ -121,13 +129,73 @@ struct RawLlmSection {
     pub max_tokens: u32,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    /// Whether this model supports tool calling. Default: true.
+    /// Set to false for models that error when `tools` is passed (e.g. some Ollama models).
+    #[serde(default = "default_supports_tools")]
+    pub supports_tools: bool,
 }
 
+/// The `[llm]` section can be one of two forms:
+///
+/// **Legacy (flat)** — single profile, treated as "default":
+/// ```toml
+/// [llm]
+/// provider = "anthropic"
+/// model = "claude-sonnet-4-20250514"
+/// api_key = "sk-..."
+/// ```
+///
+/// **Multi-profile** — named sub-tables:
+/// ```toml
+/// [llm.default]
+/// provider = "anthropic"
+/// ...
+/// [llm.deepseek]
+/// provider = "openai_compat"
+/// ...
+/// ```
+///
+/// Detection: if the TOML `[llm]` value has a `provider` key, it's legacy (flat).
+/// Otherwise it's multi-profile.
+fn parse_llm_profiles(llm_value: &toml::Value) -> Result<HashMap<String, RawLlmProfile>> {
+    let table = llm_value
+        .as_table()
+        .context("[llm] must be a TOML table")?;
+
+    // Detect: if it has a "provider" or "model" or "api_key" key at the top level,
+    // treat as legacy single profile → wrap as { "default": ... }
+    let is_legacy = table.contains_key("provider")
+        || table.contains_key("model")
+        || table.contains_key("api_key");
+
+    if is_legacy {
+        let profile: RawLlmProfile =
+            toml::Value::Table(table.clone()).try_into().context("parse [llm] as flat profile")?;
+        let mut map = HashMap::new();
+        map.insert("default".to_string(), profile);
+        Ok(map)
+    } else {
+        // Multi-profile: each key is a profile name
+        let mut map = HashMap::new();
+        for (name, value) in table {
+            let profile: RawLlmProfile =
+                value.clone().try_into().with_context(|| format!("parse [llm.{name}]"))?;
+            map.insert(name.clone(), profile);
+        }
+        if map.is_empty() {
+            anyhow::bail!("[llm] section is empty — at least one LLM profile is required");
+        }
+        Ok(map)
+    }
+}
+
+/// Top-level raw config — uses `toml::Value` for `[llm]` to support both formats.
 #[derive(Deserialize)]
 struct RawAppConfig {
+    #[serde(default)]
     pub app: AppSection,
-    pub feishu: RawFeishuSection,
-    pub llm: RawLlmSection,
+    pub feishu: Option<RawFeishuSection>,
+    pub llm: toml::Value,
     #[serde(default)]
     pub tools: ToolsSection,
     #[serde(default)]
@@ -148,6 +216,9 @@ pub struct AppSection {
     pub workspace: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Optional log file path (relative to anqclaw home). Empty = no file logging.
+    #[serde(default)]
+    pub log_file: String,
 }
 
 impl Default for AppSection {
@@ -156,6 +227,7 @@ impl Default for AppSection {
             name: default_app_name(),
             workspace: default_workspace(),
             log_level: default_log_level(),
+            log_file: String::new(),
         }
     }
 }
@@ -169,16 +241,19 @@ pub struct FeishuSection {
     pub allow_from: Vec<String>,
 }
 
-/// LLM provider settings.
+/// LLM provider settings (one profile).
 /// `api_key` is wrapped in `SecretString` after env-var resolution.
 #[derive(Debug)]
 pub struct LlmSection {
     pub provider: String,
     pub model: String,
+    /// May be empty for providers that don't need auth (e.g. Ollama).
     pub api_key: SecretString,
     pub base_url: String,
     pub max_tokens: u32,
     pub temperature: f32,
+    /// Whether this model supports tool calling.
+    pub supports_tools: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +349,9 @@ pub struct AgentSection {
     pub max_tool_rounds: u32,
     #[serde(default = "default_system_prompt_file")]
     pub system_prompt_file: String,
+    /// Which LLM profile to use. Default: "default".
+    #[serde(default = "default_llm_profile")]
+    pub llm_profile: String,
 }
 
 impl Default for AgentSection {
@@ -281,6 +359,7 @@ impl Default for AgentSection {
         Self {
             max_tool_rounds: default_max_tool_rounds(),
             system_prompt_file: default_system_prompt_file(),
+            llm_profile: default_llm_profile(),
         }
     }
 }
@@ -290,7 +369,12 @@ impl Default for AgentSection {
 #[derive(Debug)]
 pub struct AppConfig {
     pub app: AppSection,
-    pub feishu: FeishuSection,
+    /// `None` if `[feishu]` is omitted from config — Feishu channel won't start.
+    pub feishu: Option<FeishuSection>,
+    /// Named LLM profiles. At least one ("default") is required.
+    pub llm_profiles: HashMap<String, LlmSection>,
+    /// Convenience accessor: the active LLM profile (determined by `agent.llm_profile`).
+    /// This is a clone from `llm_profiles` — used by legacy code that expects a single `LlmSection`.
     pub llm: LlmSection,
     pub tools: ToolsSection,
     pub memory: MemorySection,
@@ -316,16 +400,23 @@ fn resolve_env(value: &str, field_name: &str) -> Result<String> {
     }
 }
 
+/// If `value` is empty or looks like `${VAR}` but the var is unset, return empty string
+/// (no error). Used for optional secrets like Ollama's api_key.
+fn resolve_env_optional(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    if let Some(inner) = value.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        std::env::var(inner).unwrap_or_default()
+    } else {
+        value.to_string()
+    }
+}
+
 // ─── AppConfig::load ──────────────────────────────────────────────────────────
 
 impl AppConfig {
     /// Load configuration from a TOML file.
-    ///
-    /// Steps:
-    /// 1. Read the file from disk.
-    /// 2. Parse into raw intermediate structs (secrets as plain `String`).
-    /// 3. Resolve `${ENV_VAR}` placeholders for `llm.api_key` and `feishu.app_secret`.
-    /// 4. Wrap resolved secret strings in `SecretString`.
     pub fn load(path: &str) -> Result<Self> {
         let raw_text = std::fs::read_to_string(path)
             .with_context(|| format!("Cannot read config file: {}", path))?;
@@ -337,25 +428,72 @@ impl AppConfig {
     pub fn load_from_str(toml_text: &str) -> Result<Self> {
         let raw: RawAppConfig = toml::from_str(toml_text).context("Failed to parse config TOML")?;
 
-        // Resolve env-var placeholders for sensitive fields
-        let api_key_str = resolve_env(&raw.llm.api_key, "llm.api_key")?;
-        let app_secret_str = resolve_env(&raw.feishu.app_secret, "feishu.app_secret")?;
+        // --- Feishu (optional) ---
+        let feishu = match raw.feishu {
+            Some(f) => {
+                let app_secret_str = resolve_env(&f.app_secret, "feishu.app_secret")?;
+                Some(FeishuSection {
+                    app_id: f.app_id,
+                    app_secret: SecretString::new(app_secret_str.into()),
+                    allow_from: f.allow_from,
+                })
+            }
+            None => None,
+        };
+
+        // --- LLM profiles ---
+        let raw_profiles = parse_llm_profiles(&raw.llm)?;
+        let mut llm_profiles = HashMap::new();
+
+        for (name, raw_p) in &raw_profiles {
+            let api_key_str =
+                resolve_env_optional(&raw_p.api_key);
+            llm_profiles.insert(
+                name.clone(),
+                LlmSection {
+                    provider: raw_p.provider.clone(),
+                    model: raw_p.model.clone(),
+                    api_key: SecretString::new(api_key_str.into()),
+                    base_url: raw_p.base_url.clone(),
+                    max_tokens: raw_p.max_tokens,
+                    temperature: raw_p.temperature,
+                    supports_tools: raw_p.supports_tools,
+                },
+            );
+        }
+
+        // Determine active profile
+        let active_profile_name = &raw.agent.llm_profile;
+        let active_profile = llm_profiles
+            .get(active_profile_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "agent.llm_profile = \"{}\" but no [llm.{}] profile found. Available: {:?}",
+                    active_profile_name,
+                    active_profile_name,
+                    llm_profiles.keys().collect::<Vec<_>>()
+                )
+            })?;
+
+        // Clone active profile into the convenience `llm` field
+        let llm = LlmSection {
+            provider: active_profile.provider.clone(),
+            model: active_profile.model.clone(),
+            api_key: SecretString::new(
+                // Re-resolve because SecretString can't be cloned
+                resolve_env_optional(&raw_profiles[active_profile_name].api_key).into(),
+            ),
+            base_url: active_profile.base_url.clone(),
+            max_tokens: active_profile.max_tokens,
+            temperature: active_profile.temperature,
+            supports_tools: active_profile.supports_tools,
+        };
 
         Ok(AppConfig {
             app: raw.app,
-            feishu: FeishuSection {
-                app_id: raw.feishu.app_id,
-                app_secret: SecretString::new(app_secret_str.into()),
-                allow_from: raw.feishu.allow_from,
-            },
-            llm: LlmSection {
-                provider: raw.llm.provider,
-                model: raw.llm.model,
-                api_key: SecretString::new(api_key_str.into()),
-                base_url: raw.llm.base_url,
-                max_tokens: raw.llm.max_tokens,
-                temperature: raw.llm.temperature,
-            },
+            feishu,
+            llm_profiles,
+            llm,
             tools: raw.tools,
             memory: raw.memory,
             heartbeat: raw.heartbeat,

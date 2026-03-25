@@ -1,25 +1,29 @@
 mod agent;
 mod channel;
+mod cli;
 mod config;
 mod gateway;
 mod heartbeat;
 mod llm;
 mod memory;
+mod paths;
 mod tool;
 mod types;
 
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::agent::AgentCore;
 use crate::channel::Channel;
+use crate::channel::cli::CliChannel;
 use crate::channel::feishu::FeishuChannel;
 use crate::gateway::Gateway;
 use crate::heartbeat::Heartbeat;
 use crate::llm::create_llm_client;
 use crate::memory::MemoryStore;
+use crate::paths::{anqclaw_home, ensure_dirs, find_config, resolve_path};
 use crate::tool::ToolRegistry;
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
@@ -27,9 +31,38 @@ use crate::tool::ToolRegistry;
 #[derive(Parser)]
 #[command(name = "anqclaw", version, about = "Lightweight personal AI assistant")]
 struct Cli {
-    /// Path to the configuration file
-    #[arg(short, long, default_value = "config.toml")]
-    config: String,
+    /// Path to the configuration file (overrides auto-detection)
+    #[arg(short, long, global = true)]
+    config: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the Feishu WebSocket service (default if no subcommand)
+    Serve,
+    /// Chat with the assistant via CLI
+    Chat {
+        /// Single-shot message (omit for interactive REPL)
+        message: Option<String>,
+    },
+    /// Interactive onboarding wizard
+    Onboard,
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Show current configuration (secrets masked)
+    Show,
+    /// Validate configuration and check connectivity
+    Validate,
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
@@ -37,26 +70,114 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let command = cli.command.unwrap_or(Commands::Serve);
 
-    // 1. Load configuration
-    let config = Arc::new(config::AppConfig::load(&cli.config)?);
+    match command {
+        Commands::Onboard => {
+            cli::onboard::run_onboard()
+        }
+        Commands::Config { action } => {
+            match action {
+                ConfigAction::Show => cli::config_cmd::run_show(cli.config.as_deref()),
+                ConfigAction::Validate => cli::config_cmd::run_validate(cli.config.as_deref()),
+            }
+        }
+        Commands::Chat { message } => {
+            run_chat(cli.config, message).await
+        }
+        Commands::Serve => {
+            run_serve(cli.config).await
+        }
+    }
+}
 
-    // 2. Initialize tracing (JSON to stderr)
+// ─── Shared bootstrap ──────────────────────────────────────────────────────
+
+struct Bootstrap {
+    config: Arc<config::AppConfig>,
+    memory: Arc<MemoryStore>,
+    agent: Arc<AgentCore>,
+    #[allow(dead_code)]
+    home: std::path::PathBuf,
+}
+
+async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
+    let home = anqclaw_home();
+    ensure_dirs(&home)?;
+
+    // Find and load configuration
+    let config_path = find_config(cli_config.as_deref())
+        .ok_or_else(|| anyhow::anyhow!(
+            "No config file found. Searched:\n  \
+             1. --config <path>\n  \
+             2. $ANQCLAW_CONFIG\n  \
+             3. ./config.toml\n  \
+             4. {}\n\n\
+             Run `anqclaw onboard` to create one.",
+            home.join("config.toml").display()
+        ))?;
+
+    let mut config = config::AppConfig::load(config_path.to_str().unwrap())?;
+
+    // Resolve relative paths against anqclaw home
+    config.app.workspace = resolve_path(&home, &config.app.workspace)
+        .to_string_lossy()
+        .into_owned();
+    config.memory.db_path = resolve_path(&home, &config.memory.db_path)
+        .to_string_lossy()
+        .into_owned();
+    config.tools.file_access_dir = resolve_path(&home, &config.tools.file_access_dir)
+        .to_string_lossy()
+        .into_owned();
+    if !config.app.log_file.is_empty() {
+        config.app.log_file = resolve_path(&home, &config.app.log_file)
+            .to_string_lossy()
+            .into_owned();
+    }
+
+    let config = Arc::new(config);
+
+    // Initialize tracing
     let env_filter =
         EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&config.app.log_level))?;
 
-    tracing_subscriber::registry()
+    // stderr layer (always on)
+    let stderr_layer = fmt::layer().json().with_writer(std::io::stderr);
+
+    // Optional file layer
+    let file_layer = if !config.app.log_file.is_empty() {
+        let log_path = std::path::Path::new(&config.app.log_file);
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let file_appender = tracing_appender::rolling::daily(
+            log_path.parent().unwrap_or(std::path::Path::new(".")),
+            log_path.file_name().unwrap_or(std::ffi::OsStr::new("anqclaw.log")),
+        );
+        Some(fmt::layer().json().with_writer(file_appender))
+    } else {
+        None
+    };
+
+    // Use try_init to avoid double-init panic when tests call this
+    let _ = tracing_subscriber::registry()
         .with(env_filter)
-        .with(fmt::layer().json().with_writer(std::io::stderr))
-        .init();
+        .with(stderr_layer)
+        .with(file_layer)
+        .try_init();
 
-    tracing::info!(name = config.app.name.as_str(), "anqclaw starting");
+    tracing::info!(
+        name = config.app.name.as_str(),
+        home = %home.display(),
+        config = %config_path.display(),
+        "anqclaw starting"
+    );
 
-    // 3. Initialize MemoryStore (SQLite)
+    // Initialize MemoryStore
     let memory = Arc::new(MemoryStore::new(&config.memory.db_path).await?);
     tracing::info!(db = config.memory.db_path.as_str(), "memory store initialized");
 
-    // 4. Create LLM client
+    // Create LLM client
     let llm = create_llm_client(&config.llm);
     tracing::info!(
         provider = config.llm.provider.as_str(),
@@ -64,20 +185,34 @@ async fn main() -> anyhow::Result<()> {
         "LLM client created"
     );
 
-    // 5. Create ToolRegistry
+    // Create ToolRegistry & AgentCore
     let tools = Arc::new(ToolRegistry::new(&config.tools, memory.clone()));
-
-    // 6. Create AgentCore
     let agent = Arc::new(AgentCore::new(llm, tools, memory.clone(), config.clone()));
 
-    // 7. Create channels
-    let feishu_channel: Arc<dyn Channel> = Arc::new(FeishuChannel::new(&config.feishu));
-    let channels: Vec<Arc<dyn Channel>> = vec![feishu_channel];
+    Ok(Bootstrap { config, memory, agent, home })
+}
 
-    // 8. Create Gateway
-    let gateway = Gateway::new(channels.clone(), agent.clone(), memory.clone(), config.clone());
+// ─── `anqclaw serve` ────────────────────────────────────────────────────────
 
-    // 9. Spawn Gateway
+async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
+    let bs = bootstrap(cli_config).await?;
+
+    // Create channels (feishu is optional)
+    let mut channels: Vec<Arc<dyn Channel>> = Vec::new();
+    if let Some(ref feishu_cfg) = bs.config.feishu {
+        let feishu_channel: Arc<dyn Channel> = Arc::new(FeishuChannel::new(feishu_cfg));
+        channels.push(feishu_channel);
+        tracing::info!("feishu channel enabled");
+    } else {
+        tracing::info!("feishu channel not configured — skipping");
+    }
+
+    if channels.is_empty() {
+        tracing::warn!("no channels configured — only heartbeat will run (if enabled)");
+    }
+
+    // Create & spawn Gateway
+    let gateway = Gateway::new(channels.clone(), bs.agent.clone(), bs.memory.clone(), bs.config.clone());
     let gw = gateway.clone();
     let gateway_handle = tokio::spawn(async move {
         if let Err(e) = gw.run().await {
@@ -85,19 +220,16 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 10. Spawn Heartbeat (if enabled)
-    let heartbeat_handle = if config.heartbeat.enabled {
+    // Spawn Heartbeat (if enabled)
+    let heartbeat_handle = if bs.config.heartbeat.enabled {
         let hb = Heartbeat::new(
-            &config.heartbeat,
-            agent.clone(),
-            memory.clone(),
+            &bs.config.heartbeat,
+            bs.agent.clone(),
+            bs.memory.clone(),
             channels.clone(),
-            &config.app.workspace,
+            &bs.config.app.workspace,
         );
-        tracing::info!(
-            interval_mins = config.heartbeat.interval_minutes,
-            "heartbeat enabled"
-        );
+        tracing::info!(interval_mins = bs.config.heartbeat.interval_minutes, "heartbeat enabled");
         Some(tokio::spawn(async move {
             if let Err(e) = hb.run().await {
                 tracing::error!(error = %e, "heartbeat exited with error");
@@ -108,38 +240,77 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    tracing::info!("anqclaw started — press Ctrl+C to stop");
+    tracing::info!("anqclaw serve started — press Ctrl+C to stop");
 
-    // 11. Wait for shutdown signal
+    // Wait for shutdown
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutdown signal received, stopping...");
 
-    // 12. Graceful shutdown
-    // Cancel gateway and heartbeat tasks
     gateway_handle.abort();
     if let Some(hb) = heartbeat_handle {
         hb.abort();
     }
 
-    // Wait briefly for in-flight message processing to complete
     tracing::info!("waiting for in-flight tasks to finish (max 30s)...");
-    let shutdown_timeout = tokio::time::timeout(
+    let _ = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        async {
-            // Gateway and heartbeat are aborted; give a moment for in-progress tasks
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        },
+        tokio::time::sleep(std::time::Duration::from_millis(500)),
     )
     .await;
 
-    if shutdown_timeout.is_err() {
-        tracing::warn!("shutdown timeout — forcing exit");
+    bs.memory.close().await;
+    tracing::info!("anqclaw stopped — goodbye!");
+    Ok(())
+}
+
+// ─── `anqclaw chat` ────────────────────────────────────────────────────────
+
+async fn run_chat(cli_config: Option<String>, message: Option<String>) -> anyhow::Result<()> {
+    let bs = bootstrap(cli_config).await?;
+
+    let is_single_shot = message.is_some();
+
+    let cli_channel: Arc<dyn Channel> = Arc::new(CliChannel::new(message));
+    let channels: Vec<Arc<dyn Channel>> = vec![cli_channel];
+
+    let gateway = Gateway::new(channels, bs.agent.clone(), bs.memory.clone(), bs.config.clone());
+
+    if is_single_shot {
+        // Single-shot: run gateway, wait for it to complete, exit
+        let gw = gateway.clone();
+        let handle = tokio::spawn(async move { gw.run().await });
+
+        // Give the single message time to process, then shut down
+        // The gateway will exit naturally when the CLI channel finishes
+        tokio::select! {
+            result = handle => {
+                if let Err(e) = result {
+                    tracing::error!(error = %e, "gateway error");
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("interrupted");
+            }
+        }
+    } else {
+        // Interactive REPL mode
+        println!("\x1b[1m🤖 anqclaw chat\x1b[0m — 输入 /exit 退出\n");
+
+        let gw = gateway.clone();
+        let handle = tokio::spawn(async move { gw.run().await });
+
+        tokio::select! {
+            result = handle => {
+                if let Err(e) = result {
+                    tracing::error!(error = %e, "gateway error");
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n\x1b[33m👋 再见！\x1b[0m");
+            }
+        }
     }
 
-    // Flush SQLite pending writes
-    memory.close().await;
-    tracing::info!("memory store closed");
-
-    tracing::info!("anqclaw stopped — goodbye!");
+    bs.memory.close().await;
     Ok(())
 }

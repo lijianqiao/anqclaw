@@ -1,10 +1,10 @@
 //! OpenAI-compatible LLM client.
 //!
-//! Covers: OpenAI, DeepSeek, Qwen, MiMo, Gemini (via OpenAI-compat endpoint), and
-//! any other provider that speaks the `/v1/chat/completions` protocol.
+//! Covers: OpenAI, DeepSeek, Qwen, MiMo, Gemini, Ollama, and any other provider
+//! that speaks the `/v1/chat/completions` protocol.
 //!
-//! Differences between providers are handled entirely by `base_url` + `api_key` +
-//! `model` in config — no per-provider special-casing needed.
+//! Provider quirks are handled by config fields: `base_url`, `api_key` (optional),
+//! `supports_tools`, etc. — no per-provider special-casing in code.
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
@@ -22,11 +22,13 @@ use super::LlmClient;
 
 pub struct OpenAiCompatClient {
     http: reqwest::Client,
-    base_url: String,
+    /// Full URL to the chat completions endpoint (computed once at construction).
+    endpoint: String,
     api_key: String,
     model: String,
     max_tokens: u32,
     temperature: f32,
+    supports_tools: bool,
 }
 
 impl OpenAiCompatClient {
@@ -36,13 +38,16 @@ impl OpenAiCompatClient {
             .build()
             .expect("build reqwest client");
 
+        let endpoint = build_endpoint(&config.base_url);
+
         Self {
             http,
-            base_url: config.base_url.trim_end_matches('/').to_string(),
+            endpoint,
             api_key: config.api_key.expose_secret().to_string(),
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             temperature: config.temperature,
+            supports_tools: config.supports_tools,
         }
     }
 
@@ -52,11 +57,7 @@ impl OpenAiCompatClient {
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
-
         let req_messages: Vec<OaiMessage> = messages.iter().map(to_oai_message).collect();
-
-        let req_tools: Vec<OaiTool> = tools.iter().map(to_oai_tool).collect();
 
         let mut body = serde_json::json!({
             "model": self.model,
@@ -65,7 +66,9 @@ impl OpenAiCompatClient {
             "temperature": self.temperature,
         });
 
-        if !req_tools.is_empty() {
+        // Only include tools if the model supports them AND tools are provided
+        if self.supports_tools && !tools.is_empty() {
+            let req_tools: Vec<OaiTool> = tools.iter().map(to_oai_tool).collect();
             body["tools"] = serde_json::to_value(&req_tools)?;
         }
 
@@ -78,14 +81,17 @@ impl OpenAiCompatClient {
                 tokio::time::sleep(backoff).await;
             }
 
-            let resp = self
+            let mut req = self
                 .http
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await;
+                .post(&self.endpoint)
+                .header("Content-Type", "application/json");
+
+            // Only add Authorization header if api_key is non-empty (Ollama doesn't need it)
+            if !self.api_key.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", self.api_key));
+            }
+
+            let resp = req.json(&body).send().await;
 
             match resp {
                 Ok(r) if r.status().is_success() => {
@@ -124,6 +130,40 @@ impl LlmClient for OpenAiCompatClient {
     ) -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + 'a>> {
         Box::pin(self.do_chat(messages, tools))
     }
+}
+
+// ─── Smart URL construction ─────────────────────────────────────────────────
+
+/// Builds the full endpoint URL from a base URL, handling these common cases:
+///
+/// | base_url                                               | result                                                   |
+/// |--------------------------------------------------------|----------------------------------------------------------|
+/// | `https://api.openai.com`                               | `https://api.openai.com/v1/chat/completions`             |
+/// | `https://api.openai.com/v1`                            | `https://api.openai.com/v1/chat/completions`             |
+/// | `https://api.openai.com/v1/`                           | `https://api.openai.com/v1/chat/completions`             |
+/// | `https://proxy.example.com/v1/chat/completions`        | `https://proxy.example.com/v1/chat/completions` (as-is)  |
+/// | `https://generativelanguage.googleapis.com/v1beta/openai` | `…/v1beta/openai/chat/completions`                    |
+/// | `http://localhost:11434`                               | `http://localhost:11434/v1/chat/completions`             |
+fn build_endpoint(base_url: &str) -> String {
+    let url = base_url.trim_end_matches('/');
+
+    if url.is_empty() {
+        // Default to OpenAI
+        return "https://api.openai.com/v1/chat/completions".to_string();
+    }
+
+    // Already has the full path — use as-is
+    if url.ends_with("/chat/completions") {
+        return url.to_string();
+    }
+
+    // Ends with /v1 — just append /chat/completions
+    if url.ends_with("/v1") {
+        return format!("{url}/chat/completions");
+    }
+
+    // Otherwise append /v1/chat/completions
+    format!("{url}/v1/chat/completions")
 }
 
 // ─── OpenAI wire types (private) ─────────────────────────────────────────────
@@ -285,4 +325,75 @@ fn parse_oai_response(resp: OaiResponse) -> Result<LlmResponse> {
         .collect();
 
     Ok(LlmResponse { text, tool_calls })
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_endpoint_plain_domain() {
+        assert_eq!(
+            build_endpoint("https://api.openai.com"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_endpoint_with_v1() {
+        assert_eq!(
+            build_endpoint("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_endpoint_with_v1_trailing_slash() {
+        assert_eq!(
+            build_endpoint("https://api.openai.com/v1/"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_endpoint_full_path() {
+        assert_eq!(
+            build_endpoint("https://proxy.example.com/v1/chat/completions"),
+            "https://proxy.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_endpoint_gemini() {
+        assert_eq!(
+            build_endpoint("https://generativelanguage.googleapis.com/v1beta/openai"),
+            "https://generativelanguage.googleapis.com/v1beta/openai/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_endpoint_ollama() {
+        assert_eq!(
+            build_endpoint("http://localhost:11434"),
+            "http://localhost:11434/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_endpoint_deepseek() {
+        assert_eq!(
+            build_endpoint("https://api.deepseek.com"),
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_endpoint_empty_defaults_to_openai() {
+        assert_eq!(
+            build_endpoint(""),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
 }

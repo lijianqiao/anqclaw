@@ -10,6 +10,7 @@ use dashmap::DashMap;
 use lru::LruCache;
 use std::num::NonZero;
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinSet;
 
 use crate::agent::AgentCore;
 use crate::channel::Channel;
@@ -49,8 +50,8 @@ impl Gateway {
 
     /// Starts all channels and the main message processing loop.
     ///
-    /// This function runs forever (until all channels close or an unrecoverable
-    /// error occurs).
+    /// Returns when all channels have closed AND all in-flight messages have
+    /// been processed (no orphaned tasks).
     pub async fn run(self: &Arc<Self>) -> anyhow::Result<()> {
         let (tx, mut rx) = mpsc::channel::<InboundMessage>(256);
 
@@ -70,6 +71,9 @@ impl Gateway {
 
         tracing::info!("gateway: message loop started");
 
+        // Track all spawned process_message tasks
+        let mut tasks = JoinSet::new();
+
         // Main message loop
         while let Some(msg) = rx.recv().await {
             // Dedup by message_id
@@ -82,14 +86,22 @@ impl Gateway {
                 recent.put(msg.message_id.clone(), ());
             }
 
-            // Spawn a task for each message
+            // Spawn a task for each message, tracked by JoinSet
             let gw = self.clone();
-            tokio::spawn(async move {
+            tasks.spawn(async move {
                 gw.process_message(msg).await;
             });
         }
 
-        tracing::info!("gateway: message loop ended");
+        // Wait for ALL in-flight message tasks to complete before returning.
+        // This prevents the caller from closing DB / exiting while tasks are active.
+        tracing::info!(
+            pending = tasks.len(),
+            "gateway: message loop ended, waiting for in-flight tasks"
+        );
+        while tasks.join_next().await.is_some() {}
+
+        tracing::info!("gateway: all tasks completed");
         Ok(())
     }
 

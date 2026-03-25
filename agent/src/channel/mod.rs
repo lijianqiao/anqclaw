@@ -3,6 +3,7 @@
 //! TODO(future): When splitting into workspace crates, extract the `Channel` trait
 //! into `crates/channel/` and move each implementation (feishu, etc.) into its own crate.
 
+pub mod cli;
 pub mod feishu;
 
 use anyhow::Result;
