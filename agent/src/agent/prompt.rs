@@ -3,7 +3,7 @@
 //! Used as fallback when no workspace prompt files exist and no custom
 //! `system_prompt_file` is configured.
 
-pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are ANQ Agent, a helpful personal assistant.
+pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are anqclaw, a helpful personal assistant.
 
 ## Capabilities
 - You can execute shell commands, fetch web pages, read/write files, and manage long-term memory.

@@ -1,6 +1,6 @@
 [package]
-name = "anq-agent"
-version = "0.1.0"
+name = "anqclaw"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]

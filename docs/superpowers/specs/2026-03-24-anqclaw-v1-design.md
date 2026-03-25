@@ -1,4 +1,4 @@
-# ANQ Agent v1 — 设计规格书
+# anqclaw v1 — 设计规格书
 
 ## 1. 项目概述
 
@@ -85,7 +85,7 @@ agent/
 > - `llm/` → `anq-llm` crate
 > - `tool/` → `anq-tools` crate
 > - `memory/` → `anq-memory` crate
-> - `main.rs` + `gateway.rs` + `agent/` + `heartbeat.rs` → `anq-agent` 主 crate
+> - `main.rs` + `gateway.rs` + `agent/` + `heartbeat.rs` → `anqclaw` 主 crate
 >
 > 为确保低成本拆分，当前须遵守：
 >
@@ -601,7 +601,7 @@ impl Heartbeat {
 
 ```toml
 [app]
-name = "anq-agent"
+name = "anqclaw"
 workspace = "./workspace"
 log_level = "info"                     # trace | debug | info | warn | error
 

@@ -5,7 +5,7 @@ use serde::Deserialize;
 // ─── Default value helpers ────────────────────────────────────────────────────
 
 fn default_app_name() -> String {
-    "anq-agent".to_string()
+    "anqclaw".to_string()
 }
 fn default_workspace() -> String {
     "./workspace".to_string()
@@ -327,16 +327,15 @@ impl AppConfig {
     /// 3. Resolve `${ENV_VAR}` placeholders for `llm.api_key` and `feishu.app_secret`.
     /// 4. Wrap resolved secret strings in `SecretString`.
     pub fn load(path: &str) -> Result<Self> {
-        let raw_text =
-            std::fs::read_to_string(path).with_context(|| format!("Cannot read config file: {}", path))?;
+        let raw_text = std::fs::read_to_string(path)
+            .with_context(|| format!("Cannot read config file: {}", path))?;
 
         Self::load_from_str(&raw_text)
     }
 
     /// Parse configuration from a TOML string (useful for tests).
     pub fn load_from_str(toml_text: &str) -> Result<Self> {
-        let raw: RawAppConfig =
-            toml::from_str(toml_text).context("Failed to parse config TOML")?;
+        let raw: RawAppConfig = toml::from_str(toml_text).context("Failed to parse config TOML")?;
 
         // Resolve env-var placeholders for sensitive fields
         let api_key_str = resolve_env(&raw.llm.api_key, "llm.api_key")?;

@@ -1,11 +1,11 @@
 # =============================================================================
-# anq-agent configuration file
+# anqclaw configuration file
 # =============================================================================
 
 [app]
-name = "anq-agent"
+name = "anqclaw"
 workspace = "./workspace"
-log_level = "info"          # trace | debug | info | warn | error
+log_level = "info"        # trace | debug | info | warn | error
 
 # =============================================================================
 # Feishu (Lark) integration
@@ -24,13 +24,13 @@ allow_from = []
 # LLM provider
 # =============================================================================
 [llm]
-provider = "anthropic"              # "anthropic" | "openai_compat"
+provider = "anthropic"             # "anthropic" | "openai_compat"
 model = "claude-sonnet-4-20250514"
 # Plaintext value (dev/test only):
 #   api_key = "sk-ant-xxxxxxxx"
 # Or reference an environment variable (recommended for production):
 api_key = "${ANQ_LLM_API_KEY}"
-base_url = ""                       # Leave empty for Anthropic; required for openai_compat
+base_url = ""                  # Leave empty for Anthropic; required for openai_compat
 max_tokens = 4096
 temperature = 0.7
 
@@ -39,8 +39,8 @@ temperature = 0.7
 # =============================================================================
 [memory]
 db_path = "./data/memory.db"
-history_limit = 20                  # Number of recent messages to include as context
-search_limit = 5                    # Max results returned by semantic search
+history_limit = 20           # Number of recent messages to include as context
+search_limit = 5             # Max results returned by semantic search
 
 # =============================================================================
 # Heartbeat — periodic proactive messages
@@ -63,11 +63,11 @@ shell_timeout_secs = 30
 # Web fetch tool
 web_fetch_enabled = true
 web_fetch_timeout_secs = 10
-web_fetch_max_bytes = 102400        # 100 KiB
+web_fetch_max_bytes = 102400 # 100 KiB
 
 # File tool
 file_enabled = true
-file_access_dir = "./workspace"     # Restrict file operations to this directory
+file_access_dir = "./workspace" # Restrict file operations to this directory
 
 # Memory search tool
 memory_tool_enabled = true

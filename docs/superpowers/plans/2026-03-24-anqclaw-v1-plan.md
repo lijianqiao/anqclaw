@@ -1,4 +1,4 @@
-# ANQ Agent v1 实施计划
+# anqclaw v1 实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,9 +8,9 @@
 
 **Tech Stack:** Rust (edition 2024), tokio, tokio-tungstenite, reqwest, sqlx (SQLite), serde, tracing, clap
 
-**设计规格书:** `docs/superpowers/specs/2026-03-24-anq-agent-v1-design.md`
+**设计规格书:** `docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md`
 
-**进度追踪:** `docs/superpowers/plans/2026-03-24-anq-agent-v1-progress.md`
+**进度追踪:** `docs/superpowers/plans/2026-03-24-anqclaw-v1-progress.md`
 
 ---
 
@@ -48,7 +48,7 @@
 
 ```toml
 [package]
-name = "anq-agent"
+name = "anqclaw"
 version = "0.1.0"
 edition = "2024"
 
@@ -139,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
 - [x] **Step 4: 运行 `cargo run` 确认配置加载成功**
 
 Run: `cargo run`
-Expected: 输出 "Loaded config: anq-agent"
+Expected: 输出 "Loaded config: anqclaw"
 
 ### Task 1.4: 初始化 tracing 日志
 
