@@ -234,17 +234,17 @@ fn extract_post_text(v: &serde_json::Value) -> String {
             v.as_object().and_then(|obj| obj.values().next())
         });
 
-    if let Some(post) = post {
-        if let Some(content) = post.get("content").and_then(|c| c.as_array()) {
-            for paragraph in content {
-                if let Some(elements) = paragraph.as_array() {
-                    for elem in elements {
-                        if let Some(t) = elem.get("text").and_then(|t| t.as_str()) {
-                            text.push_str(t);
-                        }
+    if let Some(post) = post
+        && let Some(content) = post.get("content").and_then(|c| c.as_array())
+    {
+        for paragraph in content {
+            if let Some(elements) = paragraph.as_array() {
+                for elem in elements {
+                    if let Some(t) = elem.get("text").and_then(|t| t.as_str()) {
+                        text.push_str(t);
                     }
-                    text.push('\n');
                 }
+                text.push('\n');
             }
         }
     }

@@ -27,10 +27,10 @@ const WORKSPACE_FILES: &[&str] = &[
 pub fn build_system_prompt(config: &AppConfig) -> String {
     // Priority 1: explicit system prompt file
     if !config.agent.system_prompt_file.is_empty() {
-        if let Ok(content) = std::fs::read_to_string(&config.agent.system_prompt_file) {
-            if !content.trim().is_empty() {
-                return content;
-            }
+        if let Ok(content) = std::fs::read_to_string(&config.agent.system_prompt_file)
+            && !content.trim().is_empty()
+        {
+            return content;
         }
         tracing::warn!(
             path = %config.agent.system_prompt_file,

@@ -711,7 +711,7 @@ Phase 7 - Gateway 消息路由，含去重与按会话串行处理
 
 ---
 
-## Phase 8: Heartbeat 定时任务
+## ✅ Phase 8: Heartbeat 定时任务
 
 **目标：** 实现 Heartbeat，定时触发 agent 处理。
 
@@ -748,7 +748,7 @@ Phase 8 - Heartbeat 定时任务，含 HEARTBEAT_OK 静默约定
 
 ---
 
-## Phase 9: 主入口 + Workspace + 优雅关机
+## ✅ Phase 9: 主入口 + Workspace + 优雅关机
 
 **目标：** 组装所有模块，创建 workspace 文件，实现优雅关机。
 
@@ -837,7 +837,7 @@ Phase 9 - 主入口组装、workspace 模板文件与优雅关机实现
 
 ---
 
-## Phase 10: 集成测试 + 端到端验证
+## ✅ Phase 10: 集成测试 + 端到端验证
 
 **目标：** 确保所有模块正确集成，端到端流程可用。
 

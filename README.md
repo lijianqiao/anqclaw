@@ -51,8 +51,3 @@ cd agent
 cargo check
 cargo run
 ```
-
-## 当前进度
-
-- 已完成：Phase 1 到 Phase 5
-- 进行中：Phase 6 及后续（Channel、Gateway、Heartbeat、入口整合、集成测试）

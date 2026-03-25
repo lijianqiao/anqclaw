@@ -17,10 +17,10 @@
 | Phase 4 | Tool Registry + 6 个内置工具 | - [x] 已完成 | 2026-03-24 | 6 工具 + 路径沙箱 + shell 白名单 + 并发执行 |
 | Phase 5 | Agent Core — Agentic Loop | - [x] 已完成 | 2026-03-25 | 3 个 mock 测试通过 |
 | Phase 6 | 飞书 Channel 实现 | - [x] 已完成 | 2026-03-25 | Protobuf 帧协议 + Interactive Card + 自动重连 |
-| Phase 7 | Gateway 消息路由 | - [ ] 未开始 | | |
-| Phase 8 | Heartbeat 定时任务 | - [ ] 未开始 | | |
-| Phase 9 | 主入口 + Workspace + 优雅关机 | - [ ] 未开始 | | |
-| Phase 10 | 集成测试 + 端到端验证 | - [ ] 未开始 | | |
+| Phase 7 | Gateway 消息路由 | - [x] 已完成 | 2026-03-25 | DashMap per-chat lock + LRU dedup |
+| Phase 8 | Heartbeat 定时任务 | - [x] 已完成 | 2026-03-25 | HEARTBEAT_OK 静默约定 + 独立 chat_id |
+| Phase 9 | 主入口 + Workspace + 优雅关机 | - [x] 已完成 | 2026-03-25 | clap CLI + 全模块组装 + Ctrl+C 优雅关机 |
+| Phase 10 | 集成测试 + 端到端验证 | - [x] 已完成 | 2026-03-25 | 23 tests pass + clippy clean + release build |
 
 ---
 
@@ -104,7 +104,7 @@
 
 | Task | 内容 | 状态 | 备注 |
 |------|------|------|------|
-| 7.1 | 实现 Gateway | - [ ] 未完成 | |
+| 7.1 | 实现 Gateway | - [x] 已完成 | DashMap per-chat lock + LRU dedup + mpsc 消息路由 |
 
 **阶段完成标志:** `cargo check` 通过，Gateway 能串联 Channel → Agent → Memory
 
@@ -114,7 +114,7 @@
 
 | Task | 内容 | 状态 | 备注 |
 |------|------|------|------|
-| 8.1 | 实现 Heartbeat | - [ ] 未完成 | |
+| 8.1 | 实现 Heartbeat | - [x] 已完成 | HEARTBEAT_OK 静默约定 + 动态重读 prompt + 独立历史 |
 
 **阶段完成标志:** `cargo check` 通过
 
@@ -124,9 +124,9 @@
 
 | Task | 内容 | 状态 | 备注 |
 |------|------|------|------|
-| 9.1 | 创建 workspace 模板文件 | - [ ] 未完成 | |
-| 9.2 | 完成 main.rs 组装 | - [ ] 未完成 | |
-| 9.3 | 优雅关机 | - [ ] 未完成 | |
+| 9.1 | 创建 workspace 模板文件 | - [x] 已完成 | 6 个模板文件 (SOUL/AGENTS/TOOLS/USER/MEMORY/HEARTBEAT) |
+| 9.2 | 完成 main.rs 组装 | - [x] 已完成 | clap CLI + 全模块组装 + tokio::spawn |
+| 9.3 | 优雅关机 | - [x] 已完成 | Ctrl+C → abort tasks → 30s timeout → close SQLite |
 
 **阶段完成标志:** `cargo build` 成功，程序能启动并响应 Ctrl+C
 
@@ -136,8 +136,8 @@
 
 | Task | 内容 | 状态 | 备注 |
 |------|------|------|------|
-| 10.1 | 集成测试 | - [ ] 未完成 | |
-| 10.2 | 编译验证 + 最终检查 | - [ ] 未完成 | |
+| 10.1 | 集成测试 | - [x] 已完成 | 5 个集成测试：纯文本 / tool loop / 历史持久化 / 多工具 / max rounds |
+| 10.2 | 编译验证 + 最终检查 | - [x] 已完成 | cargo test 23通过 + clippy 0警告 + release build 成功 |
 
 **阶段完成标志:** `cargo test` 全部通过，`cargo clippy` 无警告，`cargo build --release` 成功
 
@@ -154,3 +154,7 @@
 | 2026-03-24 | Phase 4 完成：Tool trait + ToolRegistry + 6 个内置工具（shell/web/file/memory） |
 | 2026-03-25 | Phase 5 完成：AgentCore agentic loop + context 构建 + 3 个 mock 测试 |
 | 2026-03-25 | Phase 6 完成：飞书 Channel（Protobuf WS + REST API + Interactive Card + 自动重连） |
+| 2026-03-25 | Phase 7 完成：Gateway 消息路由（DashMap per-chat lock + LRU dedup + mpsc） |
+| 2026-03-25 | Phase 8 完成：Heartbeat 定时任务（HEARTBEAT_OK 静默 + 动态 prompt 重读） |
+| 2026-03-25 | Phase 9 完成：main.rs 组装 + 6 workspace 模板 + clap CLI + 优雅关机 |
+| 2026-03-25 | Phase 10 完成：5 集成测试 + clippy clean + release build — **v1 完成** |

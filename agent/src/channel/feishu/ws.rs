@@ -322,16 +322,15 @@ fn handle_control_frame(
         return;
     }
     // Pong payload may contain updated PingInterval
-    if let Some(ref payload) = frame.payload {
-        if let Ok(cfg) = serde_json::from_slice::<WsClientConfig>(payload) {
-            if let Some(secs) = cfg.ping_interval {
-                let secs = secs.max(10);
-                if secs != *ping_secs {
-                    *ping_secs = secs;
-                    *hb_interval = tokio::time::interval(Duration::from_secs(secs));
-                    tracing::info!(ping_interval = secs, "Feishu WS: ping_interval updated");
-                }
-            }
+    if let Some(ref payload) = frame.payload
+        && let Ok(cfg) = serde_json::from_slice::<WsClientConfig>(payload)
+        && let Some(secs) = cfg.ping_interval
+    {
+        let secs = secs.max(10);
+        if secs != *ping_secs {
+            *ping_secs = secs;
+            *hb_interval = tokio::time::interval(Duration::from_secs(secs));
+            tracing::info!(ping_interval = secs, "Feishu WS: ping_interval updated");
         }
     }
 }

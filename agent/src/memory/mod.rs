@@ -12,6 +12,7 @@ pub struct Memory {
     pub key: String,
     pub content: String,
     pub tags: String,
+    #[allow(dead_code)] // Populated from DB; available for future display/filtering
     pub created_at: i64,
 }
 
@@ -36,12 +37,12 @@ impl MemoryStore {
     /// The parent directory is created automatically if it does not exist.
     pub async fn new(db_path: &str) -> Result<Self> {
         // Create parent directory if needed (skip for in-memory dbs)
-        if db_path != ":memory:" {
-            if let Some(parent) = std::path::Path::new(db_path).parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("create db directory: {}", parent.display()))?;
-            }
+        if db_path != ":memory:"
+            && let Some(parent) = std::path::Path::new(db_path).parent()
+        {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("create db directory: {}", parent.display()))?;
         }
 
         let opts = SqliteConnectOptions::from_str(db_path)
@@ -211,6 +212,11 @@ impl MemoryStore {
                 created_at: row.get("created_at"),
             })
             .collect())
+    }
+
+    /// Closes the SQLite connection pool, flushing pending writes.
+    pub async fn close(&self) {
+        self.pool.close().await;
     }
 }
 

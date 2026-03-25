@@ -66,10 +66,10 @@ impl FeishuApi {
         // Check cache
         {
             let cached = self.token.read().await;
-            if let Some(ref t) = *cached {
-                if Instant::now() < t.refresh_after {
-                    return Ok(t.value.clone());
-                }
+            if let Some(ref t) = *cached
+                && Instant::now() < t.refresh_after
+            {
+                return Ok(t.value.clone());
             }
         }
 
