@@ -1,2 +1,4 @@
 
 agent/target/
+agent/data/
+agent/config.toml

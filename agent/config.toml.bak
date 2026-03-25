@@ -11,11 +11,11 @@ log_level = "info"        # trace | debug | info | warn | error
 # Feishu (Lark) integration
 # =============================================================================
 [feishu]
-app_id = "***REMOVED***"
+app_id = ""
 # Plaintext value (dev/test only):
 #   app_secret = "your-actual-secret"
 # Or reference an environment variable (recommended for production):
-app_secret = "***REMOVED***"
+app_secret = ""
 # List of Feishu open IDs allowed to send commands to the agent.
 # Leave empty to allow all users (not recommended for production).
 allow_from = ['*']
@@ -24,13 +24,13 @@ allow_from = ['*']
 # LLM provider
 # =============================================================================
 [llm]
-provider = "openai_compat"       # "anthropic" | "openai_compat"
-model = "deepseek/deepseek-chat"
+provider = "anthropic"      # "anthropic" | "openai_compat"
+model = "claude-sonnet-4-6"
 # Plaintext value (dev/test only):
 #   api_key = "sk-ant-xxxxxxxx"
 # Or reference an environment variable (recommended for production):
-api_key = "***REMOVED***"
-base_url = "https://api.deepseek.com"                                   # Leave empty for Anthropic; required for openai_compat
+api_key = ""
+base_url = ""                                                                                                            # Leave empty for Anthropic; required for openai_compat
 max_tokens = 4096
 temperature = 0.7
 
