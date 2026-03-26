@@ -159,6 +159,15 @@ fn default_retry_delay_ms() -> u64 {
 fn default_fallback_profile() -> String {
     String::new()
 }
+fn default_install_scope() -> String {
+    "venv".to_string()
+}
+fn default_venv_path() -> String {
+    ".anqclaw/envs".to_string()
+}
+fn default_max_consecutive_tool_errors() -> u32 {
+    3
+}
 fn default_audit_enabled() -> bool {
     false
 }
@@ -654,6 +663,21 @@ pub struct AgentSection {
     /// Fallback LLM profile name. Empty = no fallback.
     #[serde(default = "default_fallback_profile")]
     pub fallback_profile: String,
+    /// Allow LLM to install packages autonomously. Default: false.
+    #[serde(default)]
+    pub auto_install_packages: bool,
+    /// Install isolation: "venv" | "user" | "system". Default: "venv".
+    #[serde(default = "default_install_scope")]
+    pub install_scope: String,
+    /// Virtual environment path (relative to workspace). Default: ".anqclaw/envs".
+    #[serde(default = "default_venv_path")]
+    pub venv_path: String,
+    /// Max consecutive all-failed tool rounds before forcing stop. Default: 3.
+    #[serde(default = "default_max_consecutive_tool_errors")]
+    pub max_consecutive_tool_errors: u32,
+    /// Extra binaries to probe at startup (appended to default list).
+    #[serde(default)]
+    pub probe_extra_binaries: Vec<String>,
 }
 
 impl Default for AgentSection {
@@ -663,6 +687,11 @@ impl Default for AgentSection {
             system_prompt_file: default_system_prompt_file(),
             llm_profile: default_llm_profile(),
             fallback_profile: default_fallback_profile(),
+            auto_install_packages: false,
+            install_scope: default_install_scope(),
+            venv_path: default_venv_path(),
+            max_consecutive_tool_errors: default_max_consecutive_tool_errors(),
+            probe_extra_binaries: Vec::new(),
         }
     }
 }

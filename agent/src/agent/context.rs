@@ -6,16 +6,11 @@
 use crate::config::AppConfig;
 use crate::memory::Memory;
 
+use super::probe::EnvironmentProbe;
 use super::prompt::DEFAULT_SYSTEM_PROMPT;
 
 /// Workspace prompt files, loaded in order.
-const WORKSPACE_FILES: &[&str] = &[
-    "SOUL.md",
-    "AGENTS.md",
-    "TOOLS.md",
-    "USER.md",
-    "MEMORY.md",
-];
+const WORKSPACE_FILES: &[&str] = &["SOUL.md", "AGENTS.md", "TOOLS.md", "USER.md", "MEMORY.md"];
 
 /// Builds the full system prompt from workspace files or config override.
 ///
@@ -24,7 +19,11 @@ const WORKSPACE_FILES: &[&str] = &[
 /// 2. Otherwise, try loading workspace files (SOUL.md → AGENTS.md → TOOLS.md →
 ///    USER.md → MEMORY.md) from `config.app.workspace`.
 /// 3. If none exist → fall back to `DEFAULT_SYSTEM_PROMPT`.
-pub fn build_system_prompt(config: &AppConfig, skill_summary: &str) -> String {
+pub fn build_system_prompt(
+    config: &AppConfig,
+    skill_summary: &str,
+    env_probe: &EnvironmentProbe,
+) -> String {
     // Priority 1: explicit system prompt file
     if !config.agent.system_prompt_file.is_empty() {
         if let Ok(content) = std::fs::read_to_string(&config.agent.system_prompt_file)
@@ -35,6 +34,9 @@ pub fn build_system_prompt(config: &AppConfig, skill_summary: &str) -> String {
                 prompt.push_str("\n\n---\n\n");
                 prompt.push_str(skill_summary);
             }
+            let env_section = env_probe.to_prompt_section(&config.agent);
+            prompt.push_str("\n\n---\n\n");
+            prompt.push_str(&env_section);
             return prompt;
         }
         tracing::warn!(
@@ -58,21 +60,27 @@ pub fn build_system_prompt(config: &AppConfig, skill_summary: &str) -> String {
         // File not found → skip silently
     }
 
-    if parts.is_empty() {
-        let mut prompt = DEFAULT_SYSTEM_PROMPT.to_string();
+    let mut prompt = if parts.is_empty() {
+        let mut p = DEFAULT_SYSTEM_PROMPT.to_string();
         if !skill_summary.is_empty() {
-            prompt.push_str("\n\n---\n\n");
-            prompt.push_str(skill_summary);
+            p.push_str("\n\n---\n\n");
+            p.push_str(skill_summary);
         }
-        prompt
+        p
     } else {
-        let mut prompt = parts.join("\n\n---\n\n");
+        let mut p = parts.join("\n\n---\n\n");
         if !skill_summary.is_empty() {
-            prompt.push_str("\n\n---\n\n");
-            prompt.push_str(skill_summary);
+            p.push_str("\n\n---\n\n");
+            p.push_str(skill_summary);
         }
-        prompt
-    }
+        p
+    };
+
+    // Append runtime environment section
+    let env_section = env_probe.to_prompt_section(&config.agent);
+    prompt.push_str("\n\n---\n\n");
+    prompt.push_str(&env_section);
+    prompt
 }
 
 /// Formats a list of memories into a text block for injection into the system

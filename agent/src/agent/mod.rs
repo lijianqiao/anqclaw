@@ -4,6 +4,7 @@
 //! `crates/agent/` with its own `Cargo.toml`.
 
 pub mod context;
+pub mod probe;
 pub mod prompt;
 pub mod redact;
 
@@ -21,6 +22,7 @@ use crate::tool::ToolRegistry;
 use crate::types::{ChatMessage, ImageData, InboundMessage, OutboundMessage, StreamEvent};
 
 use context::{build_system_prompt, format_memories};
+use probe::EnvironmentProbe;
 
 // ─── AgentCore ───────────────────────────────────────────────────────────────
 
@@ -34,10 +36,11 @@ pub struct AgentCore {
     secrets: Vec<String>,
     audit: Option<Arc<AuditLogger>>,
     skill_registry: Option<Arc<SkillRegistry>>,
+    env_probe: EnvironmentProbe,
 }
 
 impl AgentCore {
-    pub fn new(
+    pub async fn new(
         llm: Arc<dyn LlmClient>,
         fallback_llm: Option<Arc<dyn LlmClient>>,
         tools: Arc<ToolRegistry>,
@@ -51,6 +54,7 @@ impl AgentCore {
         } else {
             vec![]
         };
+        let env_probe = EnvironmentProbe::detect(&config.agent).await;
         Self {
             llm,
             fallback_llm,
@@ -60,6 +64,7 @@ impl AgentCore {
             secrets,
             audit,
             skill_registry,
+            env_probe,
         }
     }
 
@@ -111,7 +116,7 @@ impl AgentCore {
             .as_ref()
             .map(|r| r.build_summary())
             .unwrap_or_default();
-        let system_prompt = build_system_prompt(&self.config, &skill_summary);
+        let system_prompt = build_system_prompt(&self.config, &skill_summary, &self.env_probe);
 
         // 2. Search relevant memories
         let user_text = msg.content.to_text();
@@ -549,7 +554,7 @@ max_tool_rounds = 3
             vec![],
             None,
         ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
 
         let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
 
@@ -589,7 +594,7 @@ max_tool_rounds = 3
             vec![],
             None,
         ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
 
         let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
 
@@ -621,7 +626,7 @@ max_tool_rounds = 3
             vec![],
             None,
         ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
 
         let (reply, _persist) = agent.handle(&test_inbound(), &[]).await;
 

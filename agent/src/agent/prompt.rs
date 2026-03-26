@@ -20,14 +20,4 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are anqclaw, a helpful personal a
 
 ## Language
 - Respond in the same language the user uses.
-- Default to Chinese (Simplified) if unsure.
-
-## File Handling
-
-- When asked to read a PDF file, use the `pdf_read` tool.
-- When asked about an image, use `image_info` to get format, dimensions, and optionally base64 data.
-- When asked to read a .docx file, use `shell_exec` with:
-  `python3 -c "from docx import Document; d=Document('PATH'); print('\n'.join(p.text for p in d.paragraphs))"`
-- When asked to read a .xlsx file, use `shell_exec` with:
-  `python3 -c "import openpyxl; wb=openpyxl.load_workbook('PATH'); [print(c.value) for ws in wb for row in ws.iter_rows() for c in row if c.value]"`
-- If Python packages are not available, inform the user to install `python-docx` or `openpyxl`."#;
+- Default to Chinese (Simplified) if unsure."#;

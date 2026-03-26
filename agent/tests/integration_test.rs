@@ -115,7 +115,7 @@ async fn test_pure_text_reply() {
         vec![],
         None,
     ));
-    let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None, None);
+    let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None, None).await;
 
     let msg = test_inbound("Hi");
     let (reply, persist) = agent.handle(&msg, &[]).await;
@@ -162,7 +162,7 @@ async fn test_tool_call_and_reply() {
         vec![],
         None,
     ));
-    let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None, None);
+    let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None, None).await;
 
     let msg = test_inbound("My name is Test User");
     let (reply, persist) = agent.handle(&msg, &[]).await;
@@ -210,7 +210,7 @@ async fn test_history_persistence() {
         config.clone(),
         None,
         None,
-    );
+    ).await;
 
     // First message
     let msg1 = test_inbound("Hello");
@@ -280,7 +280,7 @@ async fn test_multi_tool_calls() {
         vec![],
         None,
     ));
-    let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None, None);
+    let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None, None).await;
 
     let msg = test_inbound("Save and search");
     let (reply, persist) = agent.handle(&msg, &[]).await;
@@ -331,7 +331,7 @@ max_tool_rounds = 2
         vec![],
         None,
     ));
-    let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
+    let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
 
     let msg = test_inbound("trigger loop");
     let (reply, _) = agent.handle(&msg, &[]).await;

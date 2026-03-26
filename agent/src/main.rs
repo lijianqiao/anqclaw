@@ -324,7 +324,7 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
         config.clone(),
         audit_logger,
         skill_registry.clone(),
-    ));
+    ).await);
 
     Ok(Bootstrap {
         config,
