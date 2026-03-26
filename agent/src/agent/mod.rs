@@ -164,36 +164,51 @@ impl AgentCore {
                 let budget_for_history =
                     token_budget.saturating_sub(system_tokens as u64 + last_tokens as u64);
 
-                // Scan history from newest to oldest
                 let history_end = messages.len().saturating_sub(1);
-                let mut accumulated = 0u64;
-                let mut keep_from = system_end;
-                for i in (system_end..history_end).rev() {
-                    let tok = msg_tokens[i] as u64;
-                    if accumulated + tok > budget_for_history {
-                        keep_from = i + 1;
-                        break;
-                    }
-                    accumulated += tok;
-                    keep_from = i;
-                }
 
-                let remove_count = keep_from - system_end;
-                if remove_count > 0 {
-                    messages.drain(system_end..keep_from);
-                    tracing::info!(
-                        trimmed = remove_count,
-                        total_est = total_tokens,
-                        budget = token_budget,
-                        "history trimmed to fit token budget"
-                    );
+                if budget_for_history == 0 {
+                    // System + last message already exceed budget; remove all history
+                    let remove_count = history_end - system_end;
+                    if remove_count > 0 {
+                        messages.drain(system_end..history_end);
+                        tracing::warn!(
+                            trimmed = remove_count,
+                            total_est = total_tokens,
+                            budget = token_budget,
+                            "all history trimmed — system prompt + user message exceed token budget"
+                        );
+                    }
+                } else {
+                    // Scan history from newest to oldest
+                    let mut accumulated = 0u64;
+                    let mut keep_from = system_end;
+                    for i in (system_end..history_end).rev() {
+                        let tok = msg_tokens[i] as u64;
+                        if accumulated + tok > budget_for_history {
+                            keep_from = i + 1;
+                            break;
+                        }
+                        accumulated += tok;
+                        keep_from = i;
+                    }
+
+                    let remove_count = keep_from - system_end;
+                    if remove_count > 0 {
+                        messages.drain(system_end..keep_from);
+                        tracing::info!(
+                            trimmed = remove_count,
+                            total_est = total_tokens,
+                            budget = token_budget,
+                            "history trimmed to fit token budget"
+                        );
+                    }
                 }
             }
         }
 
-        // Track new messages for persistence (everything after history)
-        // We'll collect all new messages (user + assistant + tool rounds)
-        let persist_start = messages.len() - 1; // index of user message
+        // Persist start: user message is always the last element after trimming.
+        // Using saturating_sub(1) so persist slice includes the user message onward.
+        let persist_start = messages.len().saturating_sub(1);
 
         // 4. Get tool definitions
         let tool_defs = self.tools.definitions();
@@ -284,7 +299,7 @@ impl AgentCore {
                 let results = self.tools.execute_batch(&response.tool_calls).await;
                 let tools_duration_ms = tools_start.elapsed().as_millis() as u64;
 
-                // Audit: log each tool call
+                // Audit: log each tool call (with redaction)
                 if let Some(ref audit) = self.audit
                     && self.config.audit.log_tool_calls
                 {
@@ -297,12 +312,37 @@ impl AgentCore {
                         if call.name == "file_write" && !self.config.audit.log_file_writes {
                             continue;
                         }
+                        // Redact secrets from tool output before writing to audit log
+                        let redacted_output = if self.config.security.auto_redact_secrets {
+                            redact::redact_output(
+                                &result.output,
+                                &self.secrets,
+                                &self.config.security.redact_patterns,
+                            )
+                        } else {
+                            result.output.clone()
+                        };
+                        // Redact secrets from tool arguments
+                        let redacted_args = if self.config.security.auto_redact_secrets {
+                            let args_str = call.arguments.to_string();
+                            let redacted = redact::redact_output(
+                                &args_str,
+                                &self.secrets,
+                                &self.config.security.redact_patterns,
+                            );
+                            // If redaction broke JSON structure, store as a plain string value
+                            // rather than falling back to the unredacted original
+                            serde_json::from_str(&redacted)
+                                .unwrap_or_else(|_| serde_json::Value::String(redacted))
+                        } else {
+                            call.arguments.clone()
+                        };
                         audit.log_tool_call(
                             &msg.trace_id,
                             &msg.chat_id,
                             &call.name,
-                            &call.arguments,
-                            &result.output,
+                            &redacted_args,
+                            &redacted_output,
                             result.is_error,
                             per_tool_ms,
                         );
@@ -314,30 +354,42 @@ impl AgentCore {
                     messages.push(ChatMessage::tool_result(result));
                 }
 
-                // Check if switch_model was called — swap client for subsequent rounds
+                // Check if switch_model was called — swap client for subsequent rounds.
+                // Security: only trust the signal from the actual switch_model tool,
+                // and validate the output is exactly "__switch_model:<known_profile>".
                 for (call, result) in response.tool_calls.iter().zip(results.iter()) {
-                    if call.name == "switch_model" && !result.is_error {
-                        if let Some(profile_name) = result.output.strip_prefix("__switch_model:") {
-                            if let Some(profile_cfg) = self.config.llm_profiles.get(profile_name) {
-                                match create_llm_client(profile_cfg) {
-                                    Ok(new_llm) => {
-                                        current_llm = new_llm;
-                                        current_fallback = None;
-                                        current_model_name = profile_cfg.model.clone();
-                                        tracing::info!(
-                                            profile = profile_name,
-                                            model = %current_model_name,
-                                            "switched LLM profile mid-session"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            profile = profile_name,
-                                            "failed to create LLM client for profile switch"
-                                        );
-                                    }
-                                }
+                    if call.name != "switch_model" || result.is_error {
+                        continue;
+                    }
+                    let Some(profile_name) = result.output.strip_prefix("__switch_model:") else {
+                        continue;
+                    };
+                    // Strict validation: profile name must be alphanumeric/dash/underscore only
+                    if !profile_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                        tracing::warn!(
+                            output = %result.output,
+                            "switch_model: rejected — profile name contains invalid characters"
+                        );
+                        continue;
+                    }
+                    if let Some(profile_cfg) = self.config.llm_profiles.get(profile_name) {
+                        match create_llm_client(profile_cfg) {
+                            Ok(new_llm) => {
+                                current_llm = new_llm;
+                                current_fallback = None;
+                                current_model_name = profile_cfg.model.clone();
+                                tracing::info!(
+                                    profile = profile_name,
+                                    model = %current_model_name,
+                                    "switched LLM profile mid-session"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    profile = profile_name,
+                                    "failed to create LLM client for profile switch"
+                                );
                             }
                         }
                     }

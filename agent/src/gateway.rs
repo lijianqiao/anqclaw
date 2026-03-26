@@ -171,9 +171,8 @@ impl Gateway {
                 return;
             }
             entry.push(now);
-            // GC: remove empty entries to prevent unbounded DashMap growth
-            drop(entry);
-            self.rate_limiter.retain(|_, v| !v.is_empty());
+            // No per-request GC — idle entries are bounded by max_rpm timestamps
+            // and self-clean on next access via the retain() above.
         }
 
         // Message length validation

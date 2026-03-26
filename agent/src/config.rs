@@ -249,15 +249,13 @@ impl Default for SkillsSection {
 
 // ─── HTTP channel section ────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct HttpChannelSection {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_http_bind")]
     pub bind: String,
     /// Bearer token for authentication. If empty, no auth is required.
-    #[serde(default)]
-    pub bearer_token: String,
+    /// Wrapped in `SecretString` to prevent accidental logging/debug-printing.
+    pub bearer_token: SecretString,
 }
 
 impl Default for HttpChannelSection {
@@ -265,9 +263,20 @@ impl Default for HttpChannelSection {
         Self {
             enabled: false,
             bind: default_http_bind(),
-            bearer_token: String::new(),
+            bearer_token: SecretString::new(String::new().into()),
         }
     }
+}
+
+/// Raw deserialization counterpart for `HttpChannelSection`.
+#[derive(Deserialize, Default, Clone)]
+struct RawHttpChannelSection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_http_bind")]
+    pub bind: String,
+    #[serde(default)]
+    pub bearer_token: String,
 }
 
 // ─── Scheduler section ──────────────────────────────────────────────────────
@@ -323,7 +332,7 @@ struct RawFeishuSection {
 struct RawChannelSection {
     pub feishu: Option<RawFeishuSection>,
     #[serde(default)]
-    pub http: Option<HttpChannelSection>,
+    pub http: Option<RawHttpChannelSection>,
 }
 
 /// Raw LLM profile — flat format (used in single-profile legacy mode and per-profile).
@@ -682,7 +691,7 @@ pub struct SecuritySection {
     /// Automatically redact config secret values from LLM output
     #[serde(default = "default_auto_redact_secrets")]
     pub auto_redact_secrets: bool,
-    /// Additional regex patterns to redact from LLM output
+    /// Additional literal substrings to redact from LLM output (not regex)
     #[serde(default = "default_redact_patterns")]
     pub redact_patterns: Vec<String>,
 }
@@ -793,11 +802,14 @@ impl AppConfig {
 
         // --- Feishu (optional) ---
         // [channel.feishu] takes precedence over legacy [feishu]
-        let http_channel = raw
-            .channel
-            .as_ref()
-            .and_then(|c| c.http.clone())
-            .unwrap_or_default();
+        let http_channel = match raw.channel.as_ref().and_then(|c| c.http.clone()) {
+            Some(raw_http) => HttpChannelSection {
+                enabled: raw_http.enabled,
+                bind: raw_http.bind,
+                bearer_token: SecretString::new(raw_http.bearer_token.into()),
+            },
+            None => HttpChannelSection::default(),
+        };
 
         let raw_feishu = raw.channel.and_then(|c| c.feishu).or(raw.feishu);
         let feishu = match raw_feishu {

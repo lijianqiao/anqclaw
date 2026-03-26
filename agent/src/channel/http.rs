@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
+use secrecy::ExposeSecret;
 use axum::{
     Json, Router,
     extract::{Multipart, State},
@@ -75,10 +76,13 @@ impl super::Channel for HttpChannel {
             let state = HttpState {
                 tx,
                 pending: self.pending.clone(),
-                bearer_token: if self.config.bearer_token.is_empty() {
-                    None
-                } else {
-                    Some(self.config.bearer_token.clone())
+                bearer_token: {
+                    let token = self.config.bearer_token.expose_secret();
+                    if token.is_empty() {
+                        None
+                    } else {
+                        Some(token.to_string())
+                    }
                 },
                 rate_limiter: Arc::new(DashMap::new()),
                 agent: self.agent.clone(),

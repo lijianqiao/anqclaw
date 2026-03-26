@@ -22,10 +22,16 @@ const BUILTIN_PATTERNS: &[&str] = &[
 pub fn collect_secrets(config: &AppConfig) -> Vec<String> {
     let mut secrets = Vec::new();
 
-    // LLM API keys
+    // Primary LLM API key (may differ from profiles if re-resolved)
+    let primary_key = config.llm.api_key.expose_secret().to_string();
+    if primary_key.len() >= 8 {
+        secrets.push(primary_key);
+    }
+
+    // All LLM profile API keys
     for profile in config.llm_profiles.values() {
         let key = profile.api_key.expose_secret().to_string();
-        if key.len() >= 8 {
+        if key.len() >= 8 && !secrets.contains(&key) {
             secrets.push(key);
         }
     }
@@ -36,6 +42,12 @@ pub fn collect_secrets(config: &AppConfig) -> Vec<String> {
         if secret.len() >= 8 {
             secrets.push(secret);
         }
+    }
+
+    // HTTP channel bearer token
+    let bearer = config.http_channel.bearer_token.expose_secret().to_string();
+    if bearer.len() >= 8 {
+        secrets.push(bearer);
     }
 
     secrets
