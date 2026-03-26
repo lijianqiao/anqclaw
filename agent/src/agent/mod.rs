@@ -223,6 +223,8 @@ impl AgentCore {
         let mut current_llm: Arc<dyn LlmClient> = self.llm.clone();
         let mut current_fallback: Option<Arc<dyn LlmClient>> = self.fallback_llm.clone();
         let mut current_model_name = self.config.llm.model.clone();
+        let mut consecutive_errors: usize = 0;
+        let max_consecutive = self.config.agent.max_consecutive_tool_errors as usize;
         for round in 0..max_rounds {
             let llm_start = std::time::Instant::now();
             let response = if stream_tx.is_some() {
@@ -383,6 +385,31 @@ impl AgentCore {
                 // Append each tool result
                 for result in &results {
                     messages.push(ChatMessage::tool_result(result));
+                }
+
+                // Consecutive error protection: if all tools failed this round, increment counter
+                let all_failed = results.iter().all(|r| {
+                    r.is_error
+                        || (r.output.contains("[exit code:")
+                            && !r.output.contains("[exit code: 0]"))
+                });
+                if all_failed {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= max_consecutive {
+                        let stop_hint = format!(
+                            "[system: {} consecutive rounds of tool failures detected. \
+                             Stop retrying the same approach and summarize the problem to the user. \
+                             Suggest manual steps they can take to resolve it.]",
+                            consecutive_errors
+                        );
+                        messages.push(ChatMessage::user(&stop_hint));
+                        tracing::warn!(
+                            consecutive_errors,
+                            "consecutive error protection triggered"
+                        );
+                    }
+                } else {
+                    consecutive_errors = 0;
                 }
 
                 // Check if switch_model was called — swap client for subsequent rounds.
@@ -660,5 +687,93 @@ max_tool_rounds = 3
         let (reply, _persist) = agent.handle(&test_inbound(), &[]).await;
 
         assert!(reply.content.contains("最大轮次限制"));
+    }
+
+    #[tokio::test]
+    async fn test_consecutive_errors_triggers_stop() {
+        let memory = test_memory().await;
+        let config = test_config(); // max_tool_rounds = 3, max_consecutive_tool_errors = 3
+
+        // Mock always returns tool call to a non-existent command (will produce an error result)
+        let mock_llm = Arc::new(MockLlm::new(vec![
+            // Rounds 1-3: always request tool call → always fails → on round 3 triggers stop hint
+            LlmResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_fail".into(),
+                    name: "shell_exec".into(),
+                    arguments: serde_json::json!({"command": "nonexistent_command_xyz_abc"}),
+                }],
+            },
+        ]));
+
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            memory.clone(),
+            None,
+            vec![],
+            None,
+        ));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+
+        let (_reply, persist) = agent.handle(&test_inbound(), &[]).await;
+
+        // After 3 consecutive failures (max_consecutive_tool_errors=3),
+        // a stop hint user message should appear in the persist messages.
+        let has_stop_hint = persist
+            .iter()
+            .any(|m| m.content.contains("consecutive rounds of tool failures"));
+        assert!(has_stop_hint, "stop hint should be injected after consecutive failures");
+    }
+
+    #[tokio::test]
+    async fn test_consecutive_errors_resets_on_success() {
+        let memory = test_memory().await;
+        let config = test_config(); // max_tool_rounds = 3
+
+        let mock_llm = Arc::new(MockLlm::new(vec![
+            // Round 1: tool call that fails
+            LlmResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_fail1".into(),
+                    name: "shell_exec".into(),
+                    arguments: serde_json::json!({"command": "nonexistent_command_xyz"}),
+                }],
+            },
+            // Round 2: tool call that succeeds (echo is allowed and will succeed)
+            LlmResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_ok".into(),
+                    name: "shell_exec".into(),
+                    arguments: serde_json::json!({"command": "echo success"}),
+                }],
+            },
+            // Round 3: return text (end loop)
+            LlmResponse {
+                text: Some("Done.".into()),
+                tool_calls: vec![],
+            },
+        ]));
+
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            memory.clone(),
+            None,
+            vec![],
+            None,
+        ));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+
+        let (_reply, persist) = agent.handle(&test_inbound(), &[]).await;
+
+        // A success in round 2 should reset the counter, so no stop hint
+        let has_stop_hint = persist
+            .iter()
+            .any(|m| m.content.contains("consecutive rounds of tool failures"));
+        assert!(!has_stop_hint, "stop hint should NOT appear when success resets counter");
     }
 }

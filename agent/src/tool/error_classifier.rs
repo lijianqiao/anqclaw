@@ -180,22 +180,32 @@ pub fn format_error_annotation(classification: &ErrorClassification) -> String {
 
 /// Extract command name from "xxx: command not found" or "'xxx' is not recognized".
 fn extract_missing_command(output: &str) -> String {
-    // Unix: "xxx: command not found"
+    // Unix: "bash: python3: command not found" → extract "python3"
     if let Some(pos) = output.find(": command not found") {
         let before = &output[..pos];
-        // Take the last token before ": command not found"
+        // The command is the segment after the last ':'
+        // e.g. "bash: python3" → split on ':' → last = " python3"
+        if let Some(cmd) = before.rsplit_once(':') {
+            return cmd.1.trim().to_string();
+        }
+        // Or take from the last newline
         if let Some(cmd) = before.rsplit_once('\n') {
             return cmd.1.trim().to_string();
         }
         return before.trim().to_string();
     }
-    // Windows: "'xxx' is not recognized"
+    // Windows: "'python3' is not recognized"
     if let Some(pos) = output.find("is not recognized") {
         let before = &output[..pos];
-        // Extract between quotes
-        if let Some(start) = before.rfind('\'') {
-            let candidate = &before[start + 1..];
-            return candidate.trim_matches('\'').trim().to_string();
+        // Extract between first pair of quotes: 'xxx'
+        if let Some(start) = before.find('\'') {
+            let after_start = &before[start + 1..];
+            if let Some(end) = after_start.find('\'') {
+                let name = after_start[..end].trim().to_string();
+                if !name.is_empty() {
+                    return name;
+                }
+            }
         }
         // Or just take the last word
         return before

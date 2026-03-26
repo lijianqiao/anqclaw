@@ -6,7 +6,7 @@
 //! - Blocked directories are enforced in all modes.
 //! - A configurable timeout kills the process if it runs too long.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
@@ -16,15 +16,22 @@ use super::Tool;
 
 /// Built-in readonly commands — safe to run in any mode.
 const READONLY_COMMANDS: &[&str] = &[
-    "ls", "dir", "cat", "head", "tail", "grep", "find", "date", "whoami",
-    "pwd", "wc", "sort", "uniq", "echo", "file", "stat", "type", "where",
-    "hostname", "uname", "df", "du", "env", "printenv", "which",
+    "ls", "dir", "cat", "head", "tail", "grep", "find", "date", "whoami", "pwd", "wc", "sort",
+    "uniq", "echo", "file", "stat", "type", "where", "hostname", "uname", "df", "du", "env",
+    "printenv", "which",
 ];
 
 /// Commands that are ALWAYS blocked regardless of permission level.
 const ALWAYS_BLOCKED: &[&str] = &[
-    "mkfs", "dd", "format", "shutdown", "reboot", "init", "systemctl",
-    "halt", "poweroff",
+    "mkfs",
+    "dd",
+    "format",
+    "shutdown",
+    "reboot",
+    "init",
+    "systemctl",
+    "halt",
+    "poweroff",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,49 +127,55 @@ impl ShellExec {
         Ok(())
     }
 
+    /// Check all sub-commands in a command chain against blocked/allowed lists.
+    fn check_command_chain(&self, command: &str) -> Result<()> {
+        let segments = split_command_chain(command);
+        for segment in &segments {
+            let first_token = segment.split_whitespace().next().unwrap_or("");
+
+            // Check blocked commands (applies to ALL modes)
+            if self.blocked.contains(first_token) {
+                bail!("command `{first_token}` is blocked for safety reasons");
+            }
+
+            // Check if the segment starts with any blocked pattern
+            for blocked in &self.blocked {
+                if segment.starts_with(blocked.as_str()) {
+                    bail!("command pattern `{blocked}` is blocked for safety reasons");
+                }
+            }
+
+            // Permission check — per-segment, not whole command
+            let in_trusted = !self.trusted_dirs.is_empty()
+                && self
+                    .trusted_dirs
+                    .iter()
+                    .any(|d| segment.contains(d.as_str()));
+
+            match self.permission_level {
+                PermissionLevel::Readonly | PermissionLevel::Supervised => {
+                    if !in_trusted && !self.allowed.contains(first_token) {
+                        bail!(
+                            "command `{first_token}` is not allowed in {:?} mode. Allowed: {:?}",
+                            self.permission_level,
+                            self.allowed
+                        );
+                    }
+                }
+                PermissionLevel::Full => {}
+            }
+        }
+        Ok(())
+    }
+
     async fn do_execute(&self, args: serde_json::Value) -> Result<String> {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing `command` parameter"))?;
 
-        // Extract the first token (command name)
-        let first_token = command.split_whitespace().next().unwrap_or("");
-
-        // Check blocked commands (applies to ALL modes)
-        if self.blocked.contains(first_token) {
-            bail!(
-                "command `{first_token}` is blocked for safety reasons"
-            );
-        }
-
-        // Also check if the full command starts with any blocked pattern
-        // This catches things like "rm -rf /"
-        for blocked in &self.blocked {
-            if command.trim().starts_with(blocked.as_str()) {
-                bail!("command pattern `{blocked}` is blocked for safety reasons");
-            }
-        }
-
-        // Permission check
-        // If command references a trusted_dir, skip allow-list check (treat as Full)
-        let in_trusted = !self.trusted_dirs.is_empty()
-            && self.trusted_dirs.iter().any(|d| command.contains(d.as_str()));
-
-        match self.permission_level {
-            PermissionLevel::Readonly | PermissionLevel::Supervised => {
-                if !in_trusted && !self.allowed.contains(first_token) {
-                    bail!(
-                        "command `{first_token}` is not allowed in {:?} mode. Allowed: {:?}",
-                        self.permission_level,
-                        self.allowed
-                    );
-                }
-            }
-            PermissionLevel::Full => {
-                // Full mode: allow everything except blocked
-            }
-        }
+        // Check all sub-commands in the chain (pipes, &&, || etc.)
+        self.check_command_chain(command)?;
 
         // Check blocked directories
         self.check_blocked_dirs(command)?;
@@ -233,6 +246,106 @@ impl ShellExec {
     }
 }
 
+/// Split a command string into sub-commands by shell operators.
+///
+/// Splits on `|`, `&&`, `||` (all platforms).
+/// Unix additionally splits on `;`.
+/// Windows additionally splits on single `&` (but not `&&`).
+/// Quoted sections (single or double quotes) are preserved as-is.
+pub fn split_command_chain(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while let Some(c) = chars.next() {
+        if in_single_quote {
+            current.push(c);
+            if c == '\'' {
+                in_single_quote = false;
+            }
+            continue;
+        }
+        if in_double_quote {
+            current.push(c);
+            if c == '"' {
+                in_double_quote = false;
+            }
+            continue;
+        }
+
+        match c {
+            '\'' => {
+                current.push(c);
+                in_single_quote = true;
+            }
+            '"' => {
+                current.push(c);
+                in_double_quote = true;
+            }
+            '|' => {
+                if chars.peek() == Some(&'|') {
+                    chars.next(); // consume second |
+                }
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    segments.push(trimmed);
+                }
+                current.clear();
+            }
+            '&' => {
+                if chars.peek() == Some(&'&') {
+                    chars.next(); // consume second &
+                    let trimmed = current.trim().to_string();
+                    if !trimmed.is_empty() {
+                        segments.push(trimmed);
+                    }
+                    current.clear();
+                } else {
+                    // Single & — split on Windows only
+                    #[cfg(target_os = "windows")]
+                    {
+                        let trimmed = current.trim().to_string();
+                        if !trimmed.is_empty() {
+                            segments.push(trimmed);
+                        }
+                        current.clear();
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        current.push(c);
+                    }
+                }
+            }
+            ';' => {
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let trimmed = current.trim().to_string();
+                    if !trimmed.is_empty() {
+                        segments.push(trimmed);
+                    }
+                    current.clear();
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    current.push(c);
+                }
+            }
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        segments.push(trimmed);
+    }
+
+    segments
+}
+
 impl Tool for ShellExec {
     fn name(&self) -> &str {
         "shell_exec"
@@ -281,10 +394,19 @@ mod tests {
 
     #[test]
     fn test_permission_level_parse() {
-        assert_eq!(PermissionLevel::parse("readonly"), PermissionLevel::Readonly);
+        assert_eq!(
+            PermissionLevel::parse("readonly"),
+            PermissionLevel::Readonly
+        );
         assert_eq!(PermissionLevel::parse("full"), PermissionLevel::Full);
-        assert_eq!(PermissionLevel::parse("supervised"), PermissionLevel::Supervised);
-        assert_eq!(PermissionLevel::parse("unknown"), PermissionLevel::Supervised);
+        assert_eq!(
+            PermissionLevel::parse("supervised"),
+            PermissionLevel::Supervised
+        );
+        assert_eq!(
+            PermissionLevel::parse("unknown"),
+            PermissionLevel::Supervised
+        );
     }
 
     #[tokio::test]
@@ -328,7 +450,12 @@ mod tests {
         let args = serde_json::json!({ "command": "cat /etc/passwd" });
         let result = shell.do_execute(args).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("blocked directory"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("blocked directory")
+        );
     }
 
     #[tokio::test]
@@ -337,5 +464,66 @@ mod tests {
         let args = serde_json::json!({});
         let result = shell.do_execute(args).await;
         assert!(result.is_err());
+    }
+
+    // ── split_command_chain tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_split_simple_pipe() {
+        let result = split_command_chain("ls | grep foo");
+        assert_eq!(result, vec!["ls", "grep foo"]);
+    }
+
+    #[test]
+    fn test_split_and_chain() {
+        let result = split_command_chain("echo a && echo b");
+        assert_eq!(result, vec!["echo a", "echo b"]);
+    }
+
+    #[test]
+    fn test_split_or_chain() {
+        let result = split_command_chain("cmd1 || cmd2");
+        assert_eq!(result, vec!["cmd1", "cmd2"]);
+    }
+
+    #[test]
+    fn test_split_semicolon() {
+        let result = split_command_chain("echo a; echo b");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(result, vec!["echo a", "echo b"]);
+        #[cfg(target_os = "windows")]
+        assert_eq!(result, vec!["echo a; echo b"]);
+    }
+
+    #[test]
+    fn test_split_ampersand() {
+        let result = split_command_chain("echo a & echo b");
+        #[cfg(target_os = "windows")]
+        assert_eq!(result, vec!["echo a", "echo b"]);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(result, vec!["echo a & echo b"]);
+    }
+
+    #[test]
+    fn test_split_preserves_quotes() {
+        let result = split_command_chain("echo 'a | b' | cat");
+        assert_eq!(result, vec!["echo 'a | b'", "cat"]);
+    }
+
+    #[tokio::test]
+    async fn test_check_chain_blocks_dangerous() {
+        let shell = make_shell("full");
+        let args = serde_json::json!({ "command": "echo hello | rm -rf /" });
+        let result = shell.do_execute(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("blocked"));
+    }
+
+    #[tokio::test]
+    async fn test_check_chain_allows_safe() {
+        let shell = make_shell("full");
+        let args = serde_json::json!({ "command": "echo hello | grep hello" });
+        let result = shell.do_execute(args).await;
+        assert!(result.is_ok());
     }
 }
