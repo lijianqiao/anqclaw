@@ -5,6 +5,7 @@
 //! own sub-crate or feature-gated module.
 
 pub mod custom;
+pub mod error_classifier;
 pub mod file;
 pub mod image_info;
 pub mod memory_tool;

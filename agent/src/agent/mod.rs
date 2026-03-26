@@ -301,7 +301,7 @@ impl AgentCore {
 
                 // Execute all tool calls concurrently (with timing)
                 let tools_start = std::time::Instant::now();
-                let results = self.tools.execute_batch(&response.tool_calls).await;
+                let mut results = self.tools.execute_batch(&response.tool_calls).await;
                 let tools_duration_ms = tools_start.elapsed().as_millis() as u64;
 
                 // Audit: log each tool call (with redaction)
@@ -354,6 +354,32 @@ impl AgentCore {
                     }
                 }
 
+                // Classify tool errors and annotate results with hints
+                for (call, result) in response.tool_calls.iter().zip(results.iter_mut()) {
+                    let should_classify = result.is_error
+                        || (call.name == "shell_exec"
+                            && result.output.contains("[exit code:")
+                            && !result.output.contains("[exit code: 0]"));
+                    if should_classify {
+                        let exit_code =
+                            crate::tool::error_classifier::parse_exit_code(&result.output);
+                        let classification = crate::tool::error_classifier::classify_error(
+                            &call.name,
+                            &result.output,
+                            exit_code,
+                            &self.env_probe,
+                        );
+                        if classification.kind
+                            != crate::tool::error_classifier::ToolErrorKind::Unknown
+                        {
+                            result.output +=
+                                &crate::tool::error_classifier::format_error_annotation(
+                                    &classification,
+                                );
+                        }
+                    }
+                }
+
                 // Append each tool result
                 for result in &results {
                     messages.push(ChatMessage::tool_result(result));
@@ -370,7 +396,10 @@ impl AgentCore {
                         continue;
                     };
                     // Strict validation: profile name must be alphanumeric/dash/underscore only
-                    if !profile_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                    if !profile_name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                    {
                         tracing::warn!(
                             output = %result.output,
                             "switch_model: rejected — profile name contains invalid characters"

@@ -10,7 +10,7 @@
 | 阶段 | 内容 | 状态 | 完成时间 | 备注 |
 |------|------|------|----------|------|
 | Phase 1 | 环境探测 + Prompt 重构 | - [x] 已完成 | 2026-03-26 | 76+5 单元/集成测试全过 |
-| Phase 2 | 结构化错误分类 | - [ ] 未开始 | | |
+| Phase 2 | 结构化错误分类 | - [x] 已完成 | 2026-03-26 | 16 分类测试 + 全部 162 测试通过 |
 | Phase 3 | 连续错误保护 + 管道安全 | - [ ] 未开始 | | |
 
 ---
@@ -34,11 +34,11 @@
 
 | Task | 内容 | 状态 | 备注 |
 |------|------|------|------|
-| 2.1 | 新增 error_classifier.rs | - [ ] 未开始 | |
-| 2.2 | agent/mod.rs — 集成 ErrorClassifier | - [ ] 未开始 | |
-| 2.3 | 单元测试 — ErrorClassifier | - [ ] 未开始 | |
+| 2.1 | 新增 error_classifier.rs | - [x] 已完成 | ~310 行, 9 ErrorKind 变体, classify_error()+format_error_annotation()+parse_exit_code(), 16 测试 |
+| 2.2 | agent/mod.rs — 集成 ErrorClassifier | - [x] 已完成 | results 改 mut, audit 之后 messages.push 之前插入分类循环, Unknown 不注解 |
+| 2.3 | 单元测试 — ErrorClassifier | - [x] 已完成 | 16 测试全过: command_not_found(unix/win), module_not_found(py/node/submodule), permission, syntax, file_not_found, network, disk_full, unknown, parse_exit_code, format, hint_uv, hint_no_pip |
 
-**阶段完成标志:** `cargo check --all-targets` 通过 + 14+ 分类测试通过 + tool result 末尾含 error_type 注解
+**阶段完成标志:** `cargo check --all-targets` 通过 + 16 分类测试通过 + tool result 末尾含 error_type 注解 ✅
 
 ---
 
