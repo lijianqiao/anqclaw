@@ -77,7 +77,9 @@
 
 启动时通过 `which`/`where` 探测关键运行时，结果缓存在内存中。
 
-**新增文件：** `src/agent/probe.rs`
+**新增文件：** `src/agent/probe.rs`（探测逻辑）
+
+**集成文件：** `src/agent/context.rs`（`build_system_prompt()` 接收 `&EnvironmentProbe`，在 workspace 文件之后插入环境节）
 
 ```rust
 use std::collections::HashMap;
@@ -168,7 +170,7 @@ impl EnvironmentProbe {
 **集成点：**
 
 - `AgentCore::new()` 中调用 `EnvironmentProbe::detect().await`，存储在 `AgentCore` 字段中
-- `build_system_prompt()` 接收 `&EnvironmentProbe`，在 workspace 文件之后插入环境节
+- `context.rs` 中的 `build_system_prompt()` 接收 `&EnvironmentProbe`，在 workspace 文件之后插入环境节
 - 探测结果也传给 `ErrorClassifier`（见 4.2），用于生成 hint
 
 ### 4.2 结构化错误分类（ErrorClassifier）

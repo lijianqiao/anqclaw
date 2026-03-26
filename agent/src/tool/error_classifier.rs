@@ -135,7 +135,7 @@ pub fn classify_error(
         };
     }
 
-    // 7. Network error
+    // 8. Network error
     if output.contains("ConnectionRefusedError")
         || output.contains("ECONNREFUSED")
         || output.contains("Could not resolve host")
