@@ -115,7 +115,15 @@ pub fn classify_error(
         };
     }
 
-    // 6. File not found
+    // 6. Timeout
+    if output.contains("command timed out") || output.contains("timed out after") {
+        return ErrorClassification {
+            kind: ToolErrorKind::Timeout,
+            hint: Some("The command exceeded the timeout limit. Try a faster approach or increase the timeout.".into()),
+        };
+    }
+
+    // 7. File not found
     if output.contains("No such file or directory")
         || output.contains("FileNotFoundError")
         || output.contains("The system cannot find the")
@@ -423,6 +431,14 @@ mod tests {
         let output = "OSError: [Errno 28] No space left on device\n[exit code: 1]";
         let c = classify_error("shell_exec", output, Some(1), &empty_probe());
         assert_eq!(c.kind, ToolErrorKind::DiskFull);
+    }
+
+    #[test]
+    fn test_classify_timeout() {
+        let output = "command timed out after 30s";
+        let c = classify_error("shell_exec", output, None, &empty_probe());
+        assert_eq!(c.kind, ToolErrorKind::Timeout);
+        assert!(c.hint.as_ref().unwrap().contains("timeout"));
     }
 
     #[test]
