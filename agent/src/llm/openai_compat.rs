@@ -168,18 +168,24 @@ impl OpenAiCompatClient {
                 std::collections::HashMap::new();
             let mut response = response;
             let mut done = false;
+            const MAX_BUFFER_SIZE: usize = 512 * 1024; // 512 KB safety limit
 
             while !done {
                 match response.chunk().await {
                     Ok(Some(chunk)) => {
                         buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        if buffer.len() > MAX_BUFFER_SIZE {
+                            tracing::warn!("OpenAI SSE buffer exceeded limit, truncating");
+                            break;
+                        }
                     }
                     _ => break,
                 }
 
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].trim_end().to_string();
-                    buffer = buffer[pos + 1..].to_string();
+                    // Efficient: drain processed bytes instead of copying entire remainder
+                    buffer.drain(..=pos);
 
                     let data = match line.strip_prefix("data: ") {
                         Some(d) => d,

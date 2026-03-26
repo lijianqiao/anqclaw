@@ -4,13 +4,14 @@
 //!
 //! TODO(future): When splitting into workspace crates, extract into `crates/gateway/`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use dashmap::DashMap;
 use lru::LruCache;
 use std::num::NonZero;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
 
 use crate::agent::AgentCore;
@@ -23,7 +24,8 @@ use crate::types::{InboundMessage, OutboundMessage};
 // ─── Gateway ─────────────────────────────────────────────────────────────────
 
 pub struct Gateway {
-    channels: Vec<Arc<dyn Channel>>,
+    /// Channels indexed by name for O(1) lookup.
+    channels: HashMap<String, Arc<dyn Channel>>,
     agent: Arc<AgentCore>,
     memory: Arc<MemoryStore>,
     config: Arc<AppConfig>,
@@ -44,8 +46,12 @@ impl Gateway {
         config: Arc<AppConfig>,
         metrics: Arc<Metrics>,
     ) -> Arc<Self> {
+        let channel_map: HashMap<String, Arc<dyn Channel>> = channels
+            .into_iter()
+            .map(|ch| (ch.name().to_string(), ch))
+            .collect();
         Arc::new(Self {
-            channels,
+            channels: channel_map,
             agent,
             memory,
             config,
@@ -64,7 +70,7 @@ impl Gateway {
         let (tx, mut rx) = mpsc::channel::<InboundMessage>(256);
 
         // Spawn all channel listeners
-        for ch in &self.channels {
+        for ch in self.channels.values() {
             let tx = tx.clone();
             let ch = ch.clone();
             tokio::spawn(async move {
@@ -125,6 +131,11 @@ impl Gateway {
         }
     }
 
+    /// O(1) channel lookup by name.
+    fn find_channel(&self, name: &str) -> Option<&Arc<dyn Channel>> {
+        self.channels.get(name)
+    }
+
     async fn process_message(&self, msg: InboundMessage) {
         // Assign trace_id if not already set
         let mut msg = msg;
@@ -133,7 +144,9 @@ impl Gateway {
         }
 
         // Metrics: count request
-        self.metrics.total_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .total_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let session_key = self.session_key(&msg);
 
@@ -152,12 +165,15 @@ impl Gateway {
                     "rate limit exceeded"
                 );
                 let reply = OutboundMessage::error(&msg, "请求过于频繁，请稍后再试");
-                if let Some(ch) = self.channels.iter().find(|c| c.name() == msg.channel) {
+                if let Some(ch) = self.find_channel(&msg.channel) {
                     let _ = ch.send_message(reply).await;
                 }
                 return;
             }
             entry.push(now);
+            // GC: remove empty entries to prevent unbounded DashMap growth
+            drop(entry);
+            self.rate_limiter.retain(|_, v| !v.is_empty());
         }
 
         // Message length validation
@@ -175,7 +191,7 @@ impl Gateway {
                     &msg,
                     &format!("消息过长（{} 字符），最大允许 {} 字符", text.len(), max_len),
                 );
-                if let Some(ch) = self.channels.iter().find(|c| c.name() == msg.channel) {
+                if let Some(ch) = self.find_channel(&msg.channel) {
                     let _ = ch.send_message(reply).await;
                 }
                 return;
@@ -191,7 +207,7 @@ impl Gateway {
         let _guard = lock.lock().await;
 
         // 0. Acknowledge receipt (fire-and-forget reaction)
-        if let Some(ch) = self.channels.iter().find(|c| c.name() == msg.channel)
+        if let Some(ch) = self.find_channel(&msg.channel)
             && let Err(e) = ch.acknowledge(&msg).await
         {
             tracing::debug!(error = %e, "acknowledge failed (non-critical)");
@@ -221,7 +237,7 @@ impl Gateway {
         }
 
         // 4. Send reply through the originating channel
-        if let Some(ch) = self.channels.iter().find(|c| c.name() == msg.channel) {
+        if let Some(ch) = self.find_channel(&msg.channel) {
             if let Err(e) = ch.send_message(reply).await {
                 tracing::error!(
                     channel = ch.name(),
@@ -232,5 +248,9 @@ impl Gateway {
         } else {
             tracing::warn!(channel = %msg.channel, "no matching channel for reply");
         }
+
+        // 5. GC chat_locks: remove entries with no other holders
+        drop(_guard);
+        self.chat_locks.retain(|_, v| Arc::strong_count(v) > 1);
     }
 }

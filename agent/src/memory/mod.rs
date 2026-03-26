@@ -218,6 +218,8 @@ impl MemoryStore {
     ///
     /// Returns at most `limit` results ranked by relevance (bm25).
     pub async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<Memory>> {
+        // Escape FTS5 special characters to prevent query syntax errors
+        let escaped = escape_fts5_query(query);
         let rows = sqlx::query(
             r#"
             SELECT key, content, tags, created_at
@@ -227,7 +229,7 @@ impl MemoryStore {
             LIMIT ?
             "#,
         )
-        .bind(query)
+        .bind(&escaped)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
@@ -394,6 +396,20 @@ fn str_to_role(s: &str) -> Role {
             Role::User
         }
     }
+}
+
+/// Escapes FTS5 special characters by wrapping each whitespace-separated token
+/// in double quotes. This prevents query syntax errors from user input containing
+/// characters like `*`, `"`, `(`, `)`, `^`, etc.
+fn escape_fts5_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|token| {
+            let escaped = token.replace('"', "\"\"");
+            format!("\"{escaped}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

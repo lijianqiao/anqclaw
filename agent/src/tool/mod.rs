@@ -50,6 +50,8 @@ pub trait Tool: Send + Sync {
 /// Holds all registered tools and dispatches execution by name.
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    /// Cached tool definitions, built once at construction.
+    definitions_cache: Vec<ToolDefinition>,
 }
 
 impl ToolRegistry {
@@ -145,19 +147,21 @@ impl ToolRegistry {
             "tool registry initialised"
         );
 
-        Self { tools }
-    }
-
-    /// Returns tool definitions for all registered tools (sent to the LLM).
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        let definitions_cache = tools
             .values()
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 parameters: t.parameters_schema(),
             })
-            .collect()
+            .collect();
+
+        Self { tools, definitions_cache }
+    }
+
+    /// Returns tool definitions for all registered tools (sent to the LLM).
+    pub fn definitions(&self) -> &[ToolDefinition] {
+        &self.definitions_cache
     }
 
     /// Executes a batch of tool calls concurrently.

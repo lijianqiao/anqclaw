@@ -123,6 +123,11 @@ async fn listen_ws(
                 // GC stale fragments > 5 min
                 let cutoff = Instant::now() - Duration::from_secs(300);
                 frag_cache.retain(|_, (_, ts)| *ts > cutoff);
+                // Hard cap to prevent unbounded growth from malformed streams
+                if frag_cache.len() > 100 {
+                    frag_cache.clear();
+                    tracing::warn!("Feishu WS: frag_cache exceeded 100 entries, cleared");
+                }
             }
 
             // Heartbeat timeout check
@@ -254,8 +259,15 @@ async fn listen_ws(
                 let lark_msg_id = recv.message.message_id.clone();
                 {
                     let now = Instant::now();
-                    // GC old entries
+                    // GC old entries + cap size to prevent unbounded growth
                     seen_ids.retain(|_, t| now.duration_since(*t) < Duration::from_secs(30 * 60));
+                    if seen_ids.len() > 10_000 {
+                        // Emergency cap: drop oldest entries
+                        let mut entries: Vec<_> = seen_ids.drain().collect();
+                        entries.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
+                        entries.truncate(5_000);
+                        seen_ids.extend(entries);
+                    }
                     if seen_ids.contains_key(&lark_msg_id) {
                         tracing::debug!(msg_id = %lark_msg_id, "Feishu WS: duplicate, skipping");
                         continue;

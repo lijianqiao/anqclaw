@@ -180,6 +180,25 @@ struct ErrorResponse {
     error: String,
 }
 
+/// RAII guard that removes the pending entry on drop, preventing leaks when
+/// the client disconnects or the handler future is cancelled.
+struct PendingGuard {
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<OutboundMessage>>>>,
+    message_id: String,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        let pending = self.pending.clone();
+        let id = self.message_id.clone();
+        // Best-effort cleanup — if lock is contended during shutdown, skip.
+        tokio::spawn(async move {
+            let mut map = pending.lock().await;
+            map.remove(&id);
+        });
+    }
+}
+
 async fn handle_chat(
     State(state): State<Arc<HttpState>>,
     headers: HeaderMap,
@@ -228,6 +247,9 @@ async fn handle_chat(
             ));
         }
         entry.push(now);
+        // GC: remove empty entries to prevent unbounded DashMap growth
+        drop(entry);
+        state.rate_limiter.retain(|_, v| !v.is_empty());
     }
 
     let chat_id = if req.chat_id.is_empty() {
@@ -238,12 +260,16 @@ async fn handle_chat(
 
     let message_id = uuid::Uuid::new_v4().to_string();
 
-    // Register pending oneshot
+    // Register pending oneshot with a drop guard for cleanup on cancellation
     let (resp_tx, resp_rx) = oneshot::channel();
     {
         let mut map = state.pending.lock().await;
         map.insert(message_id.clone(), resp_tx);
     }
+    let _pending_guard = PendingGuard {
+        pending: state.pending.clone(),
+        message_id: message_id.clone(),
+    };
 
     // Build inbound message
     let inbound = InboundMessage {
@@ -259,9 +285,6 @@ async fn handle_chat(
 
     // Send to gateway
     if state.tx.send(inbound).await.is_err() {
-        // Clean up pending
-        let mut map = state.pending.lock().await;
-        map.remove(&message_id);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -283,9 +306,6 @@ async fn handle_chat(
             }),
         )),
         Err(_) => {
-            // Clean up pending on timeout
-            let mut map = state.pending.lock().await;
-            map.remove(&message_id);
             Err((
                 StatusCode::GATEWAY_TIMEOUT,
                 Json(ErrorResponse {
@@ -365,6 +385,9 @@ async fn handle_chat_stream(
             ));
         }
         entry.push(now);
+        // GC: remove empty entries to prevent unbounded DashMap growth
+        drop(entry);
+        state.rate_limiter.retain(|_, v| !v.is_empty());
     }
 
     let (agent, memory, app_config) = match (&state.agent, &state.memory, &state.app_config) {
@@ -638,6 +661,10 @@ async fn handle_chat_multipart(
         let mut map = state.pending.lock().await;
         map.insert(message_id.clone(), resp_tx);
     }
+    let _pending_guard = PendingGuard {
+        pending: state.pending.clone(),
+        message_id: message_id.clone(),
+    };
 
     let images = match image_data {
         Some(img) => vec![img],
@@ -657,8 +684,6 @@ async fn handle_chat_multipart(
 
     // Send to gateway
     if state.tx.send(inbound).await.is_err() {
-        let mut map = state.pending.lock().await;
-        map.remove(&message_id);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -680,8 +705,6 @@ async fn handle_chat_multipart(
             }),
         )),
         Err(_) => {
-            let mut map = state.pending.lock().await;
-            map.remove(&message_id);
             Err((
                 StatusCode::GATEWAY_TIMEOUT,
                 Json(ErrorResponse {

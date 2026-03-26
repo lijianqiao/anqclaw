@@ -106,7 +106,8 @@ impl AgentCore {
         stream_tx: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<(OutboundMessage, Vec<ChatMessage>)> {
         // 1. Build system prompt (with skill summaries if available)
-        let skill_summary = self.skill_registry
+        let skill_summary = self
+            .skill_registry
             .as_ref()
             .map(|r| r.build_summary())
             .unwrap_or_default();
@@ -143,41 +144,37 @@ impl AgentCore {
         // Token budget: trim history if it exceeds max_tokens_per_conversation
         let token_budget = self.config.limits.max_tokens_per_conversation;
         if token_budget > 0 {
-            // Find where system messages end
-            let system_end = messages
-                .iter()
-                .position(|m| !matches!(m.role, crate::types::Role::System))
-                .unwrap_or(messages.len());
-
-            // Calculate total estimated tokens
-            let total_tokens: usize = messages
+            // Single-pass: compute per-message token counts once
+            let msg_tokens: Vec<usize> = messages
                 .iter()
                 .map(|m| token::estimate_message_tokens("msg", &m.content))
-                .sum();
+                .collect();
+            let total_tokens: usize = msg_tokens.iter().sum();
 
             if total_tokens as u64 > token_budget {
-                // Keep: system messages + last message (current user). Trim history from oldest.
-                let system_tokens: usize = messages[..system_end]
+                // Find where system messages end
+                let system_end = messages
                     .iter()
-                    .map(|m| token::estimate_message_tokens("msg", &m.content))
-                    .sum();
-                let last_tokens = messages.last()
-                    .map(|m| token::estimate_message_tokens("msg", &m.content))
-                    .unwrap_or(0);
-                let budget_for_history = token_budget
-                    .saturating_sub(system_tokens as u64 + last_tokens as u64);
+                    .position(|m| !matches!(m.role, crate::types::Role::System))
+                    .unwrap_or(messages.len());
+
+                // Keep: system messages + last message (current user). Trim history from oldest.
+                let system_tokens: usize = msg_tokens[..system_end].iter().sum();
+                let last_tokens = *msg_tokens.last().unwrap_or(&0);
+                let budget_for_history =
+                    token_budget.saturating_sub(system_tokens as u64 + last_tokens as u64);
 
                 // Scan history from newest to oldest
                 let history_end = messages.len().saturating_sub(1);
                 let mut accumulated = 0u64;
                 let mut keep_from = system_end;
                 for i in (system_end..history_end).rev() {
-                    let msg_tokens = token::estimate_message_tokens("msg", &messages[i].content) as u64;
-                    if accumulated + msg_tokens > budget_for_history {
+                    let tok = msg_tokens[i] as u64;
+                    if accumulated + tok > budget_for_history {
                         keep_from = i + 1;
                         break;
                     }
-                    accumulated += msg_tokens;
+                    accumulated += tok;
                     keep_from = i;
                 }
 
@@ -492,7 +489,14 @@ max_tool_rounds = 3
             tool_calls: vec![],
         }]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None, vec![], None));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            memory.clone(),
+            None,
+            vec![],
+            None,
+        ));
         let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
 
         let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
@@ -525,7 +529,14 @@ max_tool_rounds = 3
             },
         ]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None, vec![], None));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            memory.clone(),
+            None,
+            vec![],
+            None,
+        ));
         let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
 
         let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
@@ -550,7 +561,14 @@ max_tool_rounds = 3
             }],
         }]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None, vec![], None));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            memory.clone(),
+            None,
+            vec![],
+            None,
+        ));
         let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
 
         let (reply, _persist) = agent.handle(&test_inbound(), &[]).await;

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 // ─── Inbound Message ────────────────────────────────────────────────────────
 
@@ -69,12 +70,12 @@ pub enum MessageContent {
 
 impl MessageContent {
     /// Returns a plain-text representation of the content.
-    pub fn to_text(&self) -> String {
+    pub fn to_text(&self) -> Cow<'_, str> {
         match self {
-            MessageContent::Text(s) => s.clone(),
-            MessageContent::Image { key, .. } => format!("[图片: {}]", key),
-            MessageContent::File { key: _, name, .. } => format!("[文件: {}]", name),
-            MessageContent::RichText(_) => "[富文本消息]".to_string(),
+            MessageContent::Text(s) => Cow::Borrowed(s),
+            MessageContent::Image { key, .. } => Cow::Owned(format!("[图片: {}]", key)),
+            MessageContent::File { key: _, name, .. } => Cow::Owned(format!("[文件: {}]", name)),
+            MessageContent::RichText(_) => Cow::Borrowed("[富文本消息]"),
         }
     }
 

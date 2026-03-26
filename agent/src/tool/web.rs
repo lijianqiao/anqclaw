@@ -129,16 +129,37 @@ impl Tool for WebFetch {
     }
 }
 
-/// Strips HTML tags using a simple regex-like approach (no regex crate needed).
+/// Strips HTML tags and suppresses content within `<script>` and `<style>` blocks.
 fn strip_html_tags(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut in_tag = false;
+    let mut suppress = false; // true when inside <script> or <style>
+    let mut tag_buf = String::new();
+
     for ch in input.chars() {
         match ch {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => result.push(ch),
-            _ => {}
+            '<' => {
+                in_tag = true;
+                tag_buf.clear();
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                let tag_lower = tag_buf.to_ascii_lowercase();
+                let tag_name = tag_lower.split_whitespace().next().unwrap_or("");
+                if tag_name == "script" || tag_name == "style" {
+                    suppress = true;
+                } else if tag_name == "/script" || tag_name == "/style" {
+                    suppress = false;
+                }
+                tag_buf.clear();
+            }
+            _ if in_tag => {
+                tag_buf.push(ch);
+            }
+            _ if !suppress => {
+                result.push(ch);
+            }
+            _ => {} // suppress content inside script/style
         }
     }
     result

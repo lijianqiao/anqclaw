@@ -99,11 +99,18 @@ impl Tool for CustomTool {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
 
+            // Limit output size to prevent blowing up LLM context
+            const MAX_OUTPUT_BYTES: usize = 64 * 1024; // 64 KB
+
             if output.status.success() {
                 let mut result = stdout.into_owned();
                 if !stderr.is_empty() {
                     result.push_str("\n[stderr] ");
                     result.push_str(&stderr);
+                }
+                if result.len() > MAX_OUTPUT_BYTES {
+                    result.truncate(MAX_OUTPUT_BYTES);
+                    result.push_str("\n\n[output truncated at 64 KB]");
                 }
                 Ok(result)
             } else {
