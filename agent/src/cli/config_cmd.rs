@@ -28,7 +28,10 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     println!("\x1b[1m📁 Home:\x1b[0m {}", home.display());
     println!();
 
-    let mut config = AppConfig::load(config_path.to_str().unwrap())?;
+    let config_str = config_path.to_str().ok_or_else(|| {
+        anyhow::anyhow!("config path contains invalid UTF-8: {}", config_path.display())
+    })?;
+    let mut config = AppConfig::load(config_str)?;
 
     // Resolve paths for display
     config.app.workspace = resolve_path(&home, &config.app.workspace)
@@ -159,7 +162,8 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
     };
 
     // 2. Parse config
-    match AppConfig::load(config_path.to_str().unwrap()) {
+    let config_str = config_path.to_str().unwrap_or("<invalid-utf8>");
+    match AppConfig::load(config_str) {
         Ok(config) => {
             println!("✓ Config parsed successfully");
 

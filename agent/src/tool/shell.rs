@@ -54,6 +54,8 @@ pub struct ShellExec {
     blocked: HashSet<String>,
     /// Directories blocked from any path arguments
     blocked_dirs: Vec<String>,
+    /// Directories where Full permission applies regardless of base level
+    trusted_dirs: Vec<String>,
     timeout: Duration,
 }
 
@@ -64,6 +66,7 @@ impl ShellExec {
         extra_allowed: &[String],
         blocked_commands: &[String],
         blocked_dirs: Vec<String>,
+        trusted_dirs: Vec<String>,
         timeout_secs: u32,
     ) -> Self {
         let level = PermissionLevel::parse(permission_level);
@@ -102,6 +105,7 @@ impl ShellExec {
             allowed,
             blocked,
             blocked_dirs,
+            trusted_dirs,
             timeout: Duration::from_secs(timeout_secs as u64),
         }
     }
@@ -141,9 +145,13 @@ impl ShellExec {
         }
 
         // Permission check
+        // If command references a trusted_dir, skip allow-list check (treat as Full)
+        let in_trusted = !self.trusted_dirs.is_empty()
+            && self.trusted_dirs.iter().any(|d| command.contains(d.as_str()));
+
         match self.permission_level {
             PermissionLevel::Readonly | PermissionLevel::Supervised => {
-                if !self.allowed.contains(first_token) {
+                if !in_trusted && !self.allowed.contains(first_token) {
                     bail!(
                         "command `{first_token}` is not allowed in {:?} mode. Allowed: {:?}",
                         self.permission_level,
@@ -252,5 +260,82 @@ impl Tool for ShellExec {
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(self.do_execute(args))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_shell(level: &str) -> ShellExec {
+        ShellExec::new(
+            level,
+            &[],
+            &[],
+            &["rm".to_string()],
+            vec!["/etc".to_string()],
+            vec![],
+            5,
+        )
+    }
+
+    #[test]
+    fn test_permission_level_parse() {
+        assert_eq!(PermissionLevel::parse("readonly"), PermissionLevel::Readonly);
+        assert_eq!(PermissionLevel::parse("full"), PermissionLevel::Full);
+        assert_eq!(PermissionLevel::parse("supervised"), PermissionLevel::Supervised);
+        assert_eq!(PermissionLevel::parse("unknown"), PermissionLevel::Supervised);
+    }
+
+    #[tokio::test]
+    async fn test_readonly_allows_ls() {
+        let shell = make_shell("readonly");
+        let args = serde_json::json!({ "command": "echo hello" });
+        let result = shell.do_execute(args).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_readonly_blocks_unknown_command() {
+        let shell = make_shell("readonly");
+        let args = serde_json::json!({ "command": "cargo build" });
+        let result = shell.do_execute(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_blocked_command() {
+        let shell = make_shell("full");
+        let args = serde_json::json!({ "command": "rm -rf /" });
+        let result = shell.do_execute(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("blocked"));
+    }
+
+    #[tokio::test]
+    async fn test_always_blocked_commands() {
+        let shell = make_shell("full");
+        let args = serde_json::json!({ "command": "shutdown -h now" });
+        let result = shell.do_execute(args).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_blocked_dir_in_command() {
+        let shell = make_shell("full");
+        let args = serde_json::json!({ "command": "cat /etc/passwd" });
+        let result = shell.do_execute(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("blocked directory"));
+    }
+
+    #[tokio::test]
+    async fn test_missing_command_param() {
+        let shell = make_shell("full");
+        let args = serde_json::json!({});
+        let result = shell.do_execute(args).await;
+        assert!(result.is_err());
     }
 }

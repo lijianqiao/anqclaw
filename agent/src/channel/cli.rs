@@ -43,6 +43,8 @@ impl Channel for CliChannel {
                     message_id: uuid::Uuid::new_v4().to_string(),
                     content: MessageContent::Text(msg.clone()),
                     timestamp: chrono::Utc::now().timestamp(),
+                    trace_id: String::new(),
+                    images: vec![],
                 };
                 tx.send(inbound).await.ok();
                 // Wait a moment for processing, then the main loop will detect shutdown
@@ -86,6 +88,8 @@ impl Channel for CliChannel {
                         message_id: uuid::Uuid::new_v4().to_string(),
                         content: MessageContent::Text(trimmed.to_string()),
                         timestamp: chrono::Utc::now().timestamp(),
+                        trace_id: String::new(),
+                        images: vec![],
                     };
 
                     if tx_clone.blocking_send(inbound).is_err() {

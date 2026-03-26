@@ -76,14 +76,21 @@ fn check_blocked_dirs(path: &Path, blocked_dirs: &[String]) -> Result<()> {
 pub struct FileRead {
     sandbox: PathBuf,
     blocked_dirs: Vec<String>,
+    trusted_dirs: Vec<String>,
 }
 
 impl FileRead {
-    pub fn new(file_access_dir: &str, blocked_dirs: Vec<String>) -> Self {
+    pub fn new(file_access_dir: &str, blocked_dirs: Vec<String>, trusted_dirs: Vec<String>) -> Self {
         Self {
             sandbox: PathBuf::from(file_access_dir),
             blocked_dirs,
+            trusted_dirs,
         }
+    }
+
+    fn is_trusted(&self, path: &Path) -> bool {
+        let s = path.to_string_lossy();
+        self.trusted_dirs.iter().any(|d| s.starts_with(d.as_str()))
     }
 
     async fn do_execute(&self, args: serde_json::Value) -> Result<String> {
@@ -92,7 +99,24 @@ impl FileRead {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing `path` parameter"))?;
 
-        let path = resolve_safe_path(&self.sandbox, path_str)?;
+        let path = resolve_safe_path(&self.sandbox, path_str);
+        // If resolve_safe_path fails (outside sandbox), check if it's in a trusted dir
+        let path = match path {
+            Ok(p) => p,
+            Err(_) => {
+                let abs = if Path::new(path_str).is_absolute() {
+                    PathBuf::from(path_str)
+                } else {
+                    self.sandbox.join(path_str)
+                };
+                if self.is_trusted(&abs) {
+                    abs
+                } else {
+                    // Re-call to get the original error
+                    resolve_safe_path(&self.sandbox, path_str)?
+                }
+            }
+        };
         check_blocked_dirs(&path, &self.blocked_dirs)?;
 
         let content = tokio::fs::read_to_string(&path)
@@ -138,14 +162,21 @@ impl Tool for FileRead {
 pub struct FileWrite {
     sandbox: PathBuf,
     blocked_dirs: Vec<String>,
+    trusted_dirs: Vec<String>,
 }
 
 impl FileWrite {
-    pub fn new(file_access_dir: &str, blocked_dirs: Vec<String>) -> Self {
+    pub fn new(file_access_dir: &str, blocked_dirs: Vec<String>, trusted_dirs: Vec<String>) -> Self {
         Self {
             sandbox: PathBuf::from(file_access_dir),
             blocked_dirs,
+            trusted_dirs,
         }
+    }
+
+    fn is_trusted(&self, path: &Path) -> bool {
+        let s = path.to_string_lossy();
+        self.trusted_dirs.iter().any(|d| s.starts_with(d.as_str()))
     }
 
     async fn do_execute(&self, args: serde_json::Value) -> Result<String> {
@@ -159,7 +190,22 @@ impl FileWrite {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing `content` parameter"))?;
 
-        let path = resolve_safe_path(&self.sandbox, path_str)?;
+        let path = resolve_safe_path(&self.sandbox, path_str);
+        let path = match path {
+            Ok(p) => p,
+            Err(_) => {
+                let abs = if Path::new(path_str).is_absolute() {
+                    PathBuf::from(path_str)
+                } else {
+                    self.sandbox.join(path_str)
+                };
+                if self.is_trusted(&abs) {
+                    abs
+                } else {
+                    resolve_safe_path(&self.sandbox, path_str)?
+                }
+            }
+        };
         check_blocked_dirs(&path, &self.blocked_dirs)?;
 
         tokio::fs::write(&path, content)
@@ -201,5 +247,81 @@ impl Tool for FileWrite {
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(self.do_execute(args))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_safe_path_inside_sandbox() {
+        let dir = std::env::temp_dir().join("anqclaw_test_file_sandbox");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test.txt"), "hello").unwrap();
+
+        let result = resolve_safe_path(&dir, "test.txt");
+        assert!(result.is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_safe_path_traversal_blocked() {
+        let dir = std::env::temp_dir().join("anqclaw_test_file_traversal");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let result = resolve_safe_path(&dir, "../../etc/passwd");
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_check_blocked_dirs() {
+        let path = Path::new("/home/user/.ssh/id_rsa");
+        let blocked = vec![".ssh".to_string()];
+        let result = check_blocked_dirs(path, &blocked);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_blocked_dirs_ok() {
+        let path = Path::new("/home/user/docs/readme.md");
+        let blocked = vec![".ssh".to_string()];
+        let result = check_blocked_dirs(path, &blocked);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_file_read_write_roundtrip() {
+        let dir = std::env::temp_dir().join("anqclaw_test_file_rw");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let writer = FileWrite::new(dir.to_str().unwrap(), vec![], vec![]);
+        let args = serde_json::json!({
+            "path": "test_rw.txt",
+            "content": "hello world"
+        });
+        let r = writer.do_execute(args).await;
+        assert!(r.is_ok());
+
+        let reader = FileRead::new(dir.to_str().unwrap(), vec![], vec![]);
+        let args = serde_json::json!({ "path": "test_rw.txt" });
+        let content = reader.do_execute(args).await.unwrap();
+        assert_eq!(content, "hello world");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_file_read_missing_path_param() {
+        let reader = FileRead::new("/tmp", vec![], vec![]);
+        let args = serde_json::json!({});
+        let result = reader.do_execute(args).await;
+        assert!(result.is_err());
     }
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::LlmClient;
-use crate::types::{ChatMessage, LlmResponse, ToolDefinition};
+use crate::types::{ChatMessage, LlmResponse, StreamEvent, ToolDefinition};
 
 pub struct RetryLlmClient {
     inner: Arc<dyn LlmClient>,
@@ -54,7 +54,16 @@ impl LlmClient for RetryLlmClient {
                 }
             }
 
-            Err(last_error.unwrap())
+            Err(last_error.expect("retry loop must produce at least one error"))
         })
+    }
+
+    fn chat_stream<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        tools: &'a [ToolDefinition],
+    ) -> Pin<Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>> {
+        // Streaming doesn't retry — the user can retry manually.
+        Box::pin(async move { self.inner.chat_stream(messages, tools).await })
     }
 }

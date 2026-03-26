@@ -1,8 +1,37 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions};
 use std::str::FromStr;
 
 use crate::types::{ChatMessage, Role, ToolCall};
+
+/// Summary info for a single session (used by `anqclaw sessions`).
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionInfo {
+    pub chat_id: String,
+    pub message_count: i64,
+    pub last_active: i64,
+}
+
+/// A single exported message with timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedMessage {
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    pub created_at: i64,
+}
+
+/// Full session export payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionExport {
+    pub chat_id: String,
+    pub exported_at: i64,
+    pub messages: Vec<ExportedMessage>,
+}
 
 // ─── Public Types ────────────────────────────────────────────────────────────
 
@@ -141,6 +170,7 @@ impl MemoryStore {
                     content,
                     tool_calls,
                     tool_call_id,
+                    images: None,
                 }
             })
             .collect();
@@ -212,6 +242,128 @@ impl MemoryStore {
                 created_at: row.get("created_at"),
             })
             .collect())
+    }
+
+    // ── Session Management ────────────────────────────────────────────────────
+
+    /// Lists all sessions with message count and last-active timestamp.
+    pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT chat_id, COUNT(*) as msg_count, MAX(created_at) as last_active
+            FROM messages
+            GROUP BY chat_id
+            ORDER BY last_active DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("list sessions")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| SessionInfo {
+                chat_id: row.get("chat_id"),
+                message_count: row.get("msg_count"),
+                last_active: row.get("last_active"),
+            })
+            .collect())
+    }
+
+    /// Deletes all messages for a given chat_id. Returns the number of deleted rows.
+    pub async fn delete_session(&self, chat_id: &str) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM messages WHERE chat_id = ?")
+            .bind(chat_id)
+            .execute(&self.pool)
+            .await
+            .context("delete session")?;
+        Ok(result.rows_affected())
+    }
+
+    /// Deletes sessions whose last activity is before `before_ts` (unix epoch seconds).
+    /// Returns the number of deleted rows.
+    pub async fn delete_sessions_before(&self, before_ts: i64) -> Result<u64> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM messages WHERE chat_id IN (
+                SELECT chat_id FROM messages
+                GROUP BY chat_id
+                HAVING MAX(created_at) < ?
+            )
+            "#,
+        )
+        .bind(before_ts)
+        .execute(&self.pool)
+        .await
+        .context("delete old sessions")?;
+        Ok(result.rows_affected())
+    }
+
+    /// Exports all messages for a given chat_id as a `SessionExport`.
+    pub async fn export_session(&self, chat_id: &str) -> Result<SessionExport> {
+        let rows = sqlx::query(
+            r#"
+            SELECT role, content, tool_calls, tool_call_id, created_at
+            FROM messages
+            WHERE chat_id = ?
+            ORDER BY created_at ASC, id ASC
+            "#,
+        )
+        .bind(chat_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("export session")?;
+
+        let messages: Vec<ExportedMessage> = rows
+            .into_iter()
+            .map(|row| {
+                let tc_json: Option<String> = row.get("tool_calls");
+                ExportedMessage {
+                    role: row.get("role"),
+                    content: row.get("content"),
+                    tool_calls: tc_json.and_then(|s| serde_json::from_str(&s).ok()),
+                    tool_call_id: row.get("tool_call_id"),
+                    created_at: row.get("created_at"),
+                }
+            })
+            .collect();
+
+        Ok(SessionExport {
+            chat_id: chat_id.to_string(),
+            exported_at: chrono::Utc::now().timestamp(),
+            messages,
+        })
+    }
+
+    /// Imports a `SessionExport` into the database.
+    /// Uses the chat_id from the export payload.
+    pub async fn import_session(&self, export: &SessionExport) -> Result<()> {
+        let mut tx = self.pool.begin().await.context("begin transaction")?;
+
+        for msg in &export.messages {
+            let tool_calls_str = msg
+                .tool_calls
+                .as_ref()
+                .map(|v| v.to_string());
+
+            sqlx::query(
+                r#"
+                INSERT INTO messages (chat_id, role, content, tool_calls, tool_call_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&export.chat_id)
+            .bind(&msg.role)
+            .bind(&msg.content)
+            .bind(&tool_calls_str)
+            .bind(&msg.tool_call_id)
+            .bind(msg.created_at)
+            .execute(&mut *tx)
+            .await
+            .context("import message")?;
+        }
+
+        tx.commit().await.context("commit import")
     }
 
     /// Closes the SQLite connection pool, flushing pending writes.

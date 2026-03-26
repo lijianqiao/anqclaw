@@ -12,6 +12,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -29,78 +30,75 @@ pub struct SkillMeta {
 // ─── SkillRegistry ──────────────────────────────────────────────────────────
 
 /// Holds metadata for all discovered skills. Full content is loaded on demand.
+/// Interior mutability via `RwLock` allows hot-reload without replacing the Arc.
 #[derive(Debug)]
 pub struct SkillRegistry {
-    skills: Vec<SkillMeta>,
+    skills: std::sync::RwLock<Vec<SkillMeta>>,
+    dir: PathBuf,
 }
 
 impl SkillRegistry {
     /// Scan a directory for `.md` files with YAML frontmatter.
     /// Returns a registry with all valid skills found.
     pub fn scan(skills_dir: &Path) -> Self {
-        let mut skills = Vec::new();
-
-        if !skills_dir.exists() {
-            tracing::debug!(dir = %skills_dir.display(), "skills directory not found, skipping");
-            return Self { skills };
-        }
-
-        let entries = match std::fs::read_dir(skills_dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                tracing::warn!(dir = %skills_dir.display(), error = %e, "failed to read skills directory");
-                return Self { skills };
-            }
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map(|e| e == "md").unwrap_or(false) {
-                match parse_frontmatter(&path) {
-                    Ok(Some(meta)) => {
-                        tracing::debug!(name = %meta.name, "loaded skill");
-                        skills.push(meta);
-                    }
-                    Ok(None) => {
-                        tracing::debug!(path = %path.display(), "skipping .md file without valid frontmatter");
-                    }
-                    Err(e) => {
-                        tracing::warn!(path = %path.display(), error = %e, "failed to parse skill file");
-                    }
-                }
-            }
-        }
-
+        let skills = scan_skills(skills_dir);
         tracing::info!(count = skills.len(), "skills loaded");
-        Self { skills }
+        Self {
+            skills: std::sync::RwLock::new(skills),
+            dir: skills_dir.to_path_buf(),
+        }
     }
 
-    /// Returns metadata for all loaded skills.
-    pub fn list(&self) -> &[SkillMeta] {
-        &self.skills
+    /// Returns the watched directory path.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Re-scan the skills directory and atomically replace the skill list.
+    pub fn reload(&self) {
+        let new_skills = scan_skills(&self.dir);
+        let count = new_skills.len();
+        // unwrap_or_else recovers from poisoned lock (previous panic while holding write)
+        match self.skills.write() {
+            Ok(mut guard) => *guard = new_skills,
+            Err(e) => *e.into_inner() = new_skills,
+        }
+        tracing::info!(count, "skills reloaded");
+    }
+
+    /// Returns metadata for all loaded skills (cloned snapshot).
+    pub fn list(&self) -> Vec<SkillMeta> {
+        self.skills.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Find a skill by name.
-    pub fn find(&self, name: &str) -> Option<&SkillMeta> {
-        self.skills.iter().find(|s| s.name == name)
+    pub fn find(&self, name: &str) -> Option<SkillMeta> {
+        self.skills
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|s| s.name == name)
+            .cloned()
     }
 
     /// Load the full content of a skill (everything after the frontmatter).
     pub fn load_content(&self, name: &str) -> Result<String> {
-        let meta = self.find(name)
+        let meta = self
+            .find(name)
             .ok_or_else(|| anyhow::anyhow!("skill `{name}` not found"))?;
 
-        let raw = std::fs::read_to_string(&meta.path)
-            .map_err(|e| anyhow::anyhow!("failed to read skill file `{}`: {e}", meta.path.display()))?;
+        let raw = std::fs::read_to_string(&meta.path).map_err(|e| {
+            anyhow::anyhow!("failed to read skill file `{}`: {e}", meta.path.display())
+        })?;
 
-        // Strip frontmatter (everything between the first two `---` lines)
         Ok(strip_frontmatter(&raw))
     }
 
     /// Build a summary string for injection into the system prompt.
     /// Returns empty string if no skills are loaded.
     pub fn build_summary(&self) -> String {
-        if self.skills.is_empty() {
+        let skills = self.skills.read().unwrap_or_else(|e| e.into_inner());
+        if skills.is_empty() {
             return String::new();
         }
 
@@ -108,19 +106,105 @@ impl SkillRegistry {
         out.push_str("You have access to these specialized skills. ");
         out.push_str("When a user's request matches a skill's trigger, call `activate_skill` with the skill name to load it BEFORE responding.\n\n");
 
-        for skill in &self.skills {
+        for skill in skills.iter() {
             out.push_str(&format!(
                 "- **{}**: {}\n  Trigger: {}\n",
                 skill.name, skill.description, skill.trigger
             ));
         }
 
-        out.push_str("\nDo NOT guess the skill's content — always call `activate_skill(name)` to load the full prompt.\n");
+        out.push_str(
+            "\nDo NOT guess the skill's content — always call `activate_skill(name)` to load the full prompt.\n",
+        );
         out
     }
 }
 
+// ─── Hot-reload watcher ─────────────────────────────────────────────────────
+
+/// Spawns a background file watcher for the skills directory.
+/// Returns the watcher handle — caller must keep it alive.
+pub fn spawn_skill_watcher(
+    registry: Arc<SkillRegistry>,
+) -> Result<notify::RecommendedWatcher> {
+    use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
+
+    let dir = registry.dir().to_path_buf();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+
+    let mut watcher =
+        recommended_watcher(move |res: std::result::Result<notify::Event, notify::Error>| {
+            if let Ok(event) = res {
+                let dominated = matches!(
+                    event.kind,
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                );
+                if dominated {
+                    let is_md = event
+                        .paths
+                        .iter()
+                        .any(|p| p.extension().is_some_and(|e| e == "md"));
+                    if is_md {
+                        let _ = tx.try_send(());
+                    }
+                }
+            }
+        })?;
+
+    watcher.watch(&dir, RecursiveMode::NonRecursive)?;
+
+    tokio::spawn(async move {
+        let debounce = tokio::time::Duration::from_secs(1);
+        while rx.recv().await.is_some() {
+            // Debounce: wait, then drain any queued events
+            tokio::time::sleep(debounce).await;
+            while rx.try_recv().is_ok() {}
+            registry.reload();
+        }
+    });
+
+    Ok(watcher)
+}
+
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
+
+/// Scan a directory for `.md` files with valid YAML frontmatter, returning skill metadata.
+fn scan_skills(skills_dir: &Path) -> Vec<SkillMeta> {
+    let mut skills = Vec::new();
+
+    if !skills_dir.exists() {
+        tracing::debug!(dir = %skills_dir.display(), "skills directory not found, skipping");
+        return skills;
+    }
+
+    let entries = match std::fs::read_dir(skills_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(dir = %skills_dir.display(), error = %e, "failed to read skills directory");
+            return skills;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "md") {
+            match parse_frontmatter(&path) {
+                Ok(Some(meta)) => {
+                    tracing::debug!(name = %meta.name, "loaded skill");
+                    skills.push(meta);
+                }
+                Ok(None) => {
+                    tracing::debug!(path = %path.display(), "skipping .md file without valid frontmatter");
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to parse skill file");
+                }
+            }
+        }
+    }
+
+    skills
+}
 
 /// Parse YAML frontmatter from a markdown file.
 /// Returns None if no valid frontmatter found.

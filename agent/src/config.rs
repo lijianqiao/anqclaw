@@ -203,10 +203,9 @@ pub struct AuditSection {
     pub log_file: String,
     #[serde(default = "default_log_tool_calls")]
     pub log_tool_calls: bool,
-    #[allow(dead_code)]
     #[serde(default = "default_log_shell_commands")]
     pub log_shell_commands: bool,
-    #[allow(dead_code)]
+
     #[serde(default = "default_log_file_writes")]
     pub log_file_writes: bool,
     #[serde(default = "default_log_llm_calls")]
@@ -234,7 +233,6 @@ pub struct SkillsSection {
     pub enabled: bool,
     #[serde(default = "default_skills_dir")]
     pub skills_dir: String,
-    #[allow(dead_code)]
     #[serde(default = "default_max_active_skills")]
     pub max_active_skills: u32,
 }
@@ -531,6 +529,24 @@ pub struct ToolsSection {
     pub memory_tool_enabled: bool,
     #[serde(default = "default_memory_tool_search_limit")]
     pub memory_tool_search_limit: u32,
+
+    /// Custom external tools defined in config.
+    #[serde(default)]
+    pub custom: Vec<CustomToolConfig>,
+}
+
+/// A custom tool that executes an external command.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CustomToolConfig {
+    pub name: String,
+    pub description: String,
+    pub command: String,
+    #[serde(default = "default_custom_tool_timeout")]
+    pub timeout_secs: u32,
+}
+
+fn default_custom_tool_timeout() -> u32 {
+    120
 }
 
 impl Default for ToolsSection {
@@ -550,6 +566,7 @@ impl Default for ToolsSection {
             web_blocked_domains: default_web_blocked_domains(),
             memory_tool_enabled: default_memory_tool_enabled(),
             memory_tool_search_limit: default_memory_tool_search_limit(),
+            custom: vec![],
         }
     }
 }

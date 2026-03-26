@@ -4,8 +4,10 @@
 //! and `ToolRegistry` into `crates/tool/` and move each built-in tool into its
 //! own sub-crate or feature-gated module.
 
+pub mod custom;
 pub mod file;
 pub mod memory_tool;
+pub mod model_tool;
 pub mod shell;
 pub mod skill_tool;
 pub mod web;
@@ -16,7 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::config::{SecuritySection, ToolsSection};
+use crate::config::{SecuritySection, SkillsSection, ToolsSection};
 use crate::memory::MemoryStore;
 use crate::skill::SkillRegistry;
 use crate::types::{ToolCall, ToolDefinition, ToolResult};
@@ -57,6 +59,8 @@ impl ToolRegistry {
         security: &SecuritySection,
         memory_store: Arc<MemoryStore>,
         skill_registry: Option<Arc<SkillRegistry>>,
+        llm_profile_names: Vec<String>,
+        skills_config: Option<&SkillsSection>,
     ) -> Self {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
 
@@ -74,6 +78,7 @@ impl ToolRegistry {
                 &config.shell_extra_allowed,
                 &config.shell_blocked_commands,
                 all_blocked_dirs,
+                security.trusted_dirs.clone(),
                 config.shell_timeout_secs,
             );
             tools.insert(t.name().to_string(), Arc::new(t));
@@ -95,18 +100,24 @@ impl ToolRegistry {
                 .collect();
             all_blocked_dirs.extend(security.blocked_dirs.iter().cloned());
 
-            let read_tool = file::FileRead::new(&config.file_access_dir, all_blocked_dirs.clone());
-            let write_tool = file::FileWrite::new(&config.file_access_dir, all_blocked_dirs);
+            let read_tool = file::FileRead::new(
+                &config.file_access_dir,
+                all_blocked_dirs.clone(),
+                security.trusted_dirs.clone(),
+            );
+            let write_tool = file::FileWrite::new(
+                &config.file_access_dir,
+                all_blocked_dirs,
+                security.trusted_dirs.clone(),
+            );
             tools.insert(read_tool.name().to_string(), Arc::new(read_tool));
             tools.insert(write_tool.name().to_string(), Arc::new(write_tool));
         }
 
         if config.memory_tool_enabled {
             let save_tool = memory_tool::MemorySave::new(memory_store.clone());
-            let search_tool = memory_tool::MemorySearch::new(
-                memory_store,
-                config.memory_tool_search_limit,
-            );
+            let search_tool =
+                memory_tool::MemorySearch::new(memory_store, config.memory_tool_search_limit);
             tools.insert(save_tool.name().to_string(), Arc::new(save_tool));
             tools.insert(search_tool.name().to_string(), Arc::new(search_tool));
         }
@@ -114,11 +125,21 @@ impl ToolRegistry {
         // Register activate_skill tool if skills are available
         if let Some(registry) = skill_registry {
             if !registry.list().is_empty() {
-                let t = skill_tool::ActivateSkill::new(registry);
+                let max_active = skills_config.map(|s| s.max_active_skills).unwrap_or(3);
+                let t = skill_tool::ActivateSkill::new(registry, max_active);
                 tools.insert(t.name().to_string(), Arc::new(t));
             }
         }
-
+        // Register switch_model tool if multiple LLM profiles are configured
+        if llm_profile_names.len() > 1 {
+            let t = model_tool::SwitchModel::new(llm_profile_names);
+            tools.insert(t.name().to_string(), Arc::new(t));
+        }
+        // Register custom tools from config
+        for custom_config in &config.custom {
+            let t = custom::CustomTool::new(custom_config);
+            tools.insert(t.name().to_string(), Arc::new(t));
+        }
         tracing::info!(
             tools = ?tools.keys().collect::<Vec<_>>(),
             "tool registry initialised"

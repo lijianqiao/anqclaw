@@ -29,4 +29,10 @@ dirs = "6"
 cron = "0.15"
 dialoguer = "0.11"
 url = "2"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
+tokio-stream = "0.1"
+base64 = "0.22"
+notify = "7"
+
+[dev-dependencies]
+tower = "0.5"

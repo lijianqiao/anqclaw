@@ -1,17 +1,17 @@
-//! Integration tests — Agent + Memory + Tools end-to-end.
+//! Integration tests �?Agent + Memory + Tools end-to-end.
 //!
 //! Uses a mock LlmClient to test the complete chain:
-//! InboundMessage → AgentCore → ToolRegistry → MemoryStore → OutboundMessage
+//! InboundMessage �?AgentCore �?ToolRegistry �?MemoryStore �?OutboundMessage
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::Result;
 
-use anqclaw::config::AppConfig;
 use anqclaw::agent::AgentCore;
+use anqclaw::config::AppConfig;
 use anqclaw::llm::LlmClient;
 use anqclaw::memory::MemoryStore;
 use anqclaw::tool::ToolRegistry;
@@ -89,12 +89,14 @@ fn test_inbound(text: &str) -> InboundMessage {
         message_id: format!("msg_{}", uuid::Uuid::new_v4()),
         content: MessageContent::Text(text.into()),
         timestamp: chrono::Utc::now().timestamp(),
+        trace_id: String::new(),
+        images: vec![],
     }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
-/// Test: pure text reply — no tool calls
+/// Test: pure text reply �?no tool calls
 #[tokio::test]
 async fn test_pure_text_reply() {
     let config = test_config();
@@ -105,7 +107,14 @@ async fn test_pure_text_reply() {
         tool_calls: vec![],
     }]));
 
-    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None));
+    let tools = Arc::new(ToolRegistry::new(
+        &config.tools,
+        &config.security,
+        memory.clone(),
+        None,
+        vec![],
+        None,
+    ));
     let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None, None);
 
     let msg = test_inbound("Hi");
@@ -118,7 +127,7 @@ async fn test_pure_text_reply() {
     assert_eq!(persist.len(), 2);
 }
 
-/// Test: tool calling loop — LLM requests tool, sees result, replies
+/// Test: tool calling loop �?LLM requests tool, sees result, replies
 #[tokio::test]
 async fn test_tool_call_and_reply() {
     let config = test_config();
@@ -145,7 +154,14 @@ async fn test_tool_call_and_reply() {
         },
     ]));
 
-    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None));
+    let tools = Arc::new(ToolRegistry::new(
+        &config.tools,
+        &config.security,
+        memory.clone(),
+        None,
+        vec![],
+        None,
+    ));
     let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None, None);
 
     let msg = test_inbound("My name is Test User");
@@ -178,8 +194,23 @@ async fn test_history_persistence() {
         },
     ]));
 
-    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None));
-    let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config.clone(), None, None);
+    let tools = Arc::new(ToolRegistry::new(
+        &config.tools,
+        &config.security,
+        memory.clone(),
+        None,
+        vec![],
+        None,
+    ));
+    let agent = AgentCore::new(
+        mock_llm,
+        None,
+        tools,
+        memory.clone(),
+        config.clone(),
+        None,
+        None,
+    );
 
     // First message
     let msg1 = test_inbound("Hello");
@@ -241,7 +272,14 @@ async fn test_multi_tool_calls() {
         },
     ]));
 
-    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None));
+    let tools = Arc::new(ToolRegistry::new(
+        &config.tools,
+        &config.security,
+        memory.clone(),
+        None,
+        vec![],
+        None,
+    ));
     let agent = AgentCore::new(mock_llm, None, tools, memory.clone(), config, None, None);
 
     let msg = test_inbound("Save and search");
@@ -275,7 +313,7 @@ max_tool_rounds = 2
     let config = Arc::new(AppConfig::load_from_str(toml_str).unwrap());
     let memory = Arc::new(MemoryStore::new(":memory:").await.unwrap());
 
-    // Always returns tool calls — never text
+    // Always returns tool calls �?never text
     let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
         text: None,
         tool_calls: vec![ToolCall {
@@ -285,7 +323,14 @@ max_tool_rounds = 2
         }],
     }]));
 
-    let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None));
+    let tools = Arc::new(ToolRegistry::new(
+        &config.tools,
+        &config.security,
+        memory.clone(),
+        None,
+        vec![],
+        None,
+    ));
     let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
 
     let msg = test_inbound("trigger loop");

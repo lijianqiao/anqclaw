@@ -7,9 +7,11 @@ mod gateway;
 mod heartbeat;
 mod llm;
 mod memory;
+mod metrics;
 mod paths;
 mod scheduler;
 mod skill;
+mod token;
 mod tool;
 mod types;
 
@@ -60,6 +62,24 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Export a session to JSON
+    Export {
+        /// The chat_id to export
+        chat_id: String,
+        /// Output file path (defaults to <chat_id>.json)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Import a session from JSON
+    Import {
+        /// Path to the JSON file
+        file: String,
+    },
+    /// Session management
+    Sessions {
+        #[command(subcommand)]
+        action: Option<SessionAction>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -68,6 +88,21 @@ enum ConfigAction {
     Show,
     /// Validate configuration and check connectivity
     Validate,
+}
+
+#[derive(Subcommand)]
+enum SessionAction {
+    /// Clean sessions older than a given duration (e.g. 30d, 24h)
+    Clean {
+        /// Duration threshold, e.g. "30d", "7d", "24h"
+        #[arg(long)]
+        before: String,
+    },
+    /// Delete a specific session by chat_id
+    Delete {
+        /// The chat_id to delete
+        chat_id: String,
+    },
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
@@ -85,6 +120,32 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Chat { message } => run_chat(cli.config, message).await,
         Commands::Serve => run_serve(cli.config).await,
+        Commands::Export { chat_id, output } => {
+            run_session_cmd(cli.config, |memory| async move {
+                cli::session_cmd::run_export(&memory, &chat_id, output.as_deref()).await
+            })
+            .await
+        }
+        Commands::Import { file } => {
+            run_session_cmd(cli.config, |memory| async move {
+                cli::session_cmd::run_import(&memory, &file).await
+            })
+            .await
+        }
+        Commands::Sessions { action } => {
+            run_session_cmd(cli.config, |memory| async move {
+                match action {
+                    None => cli::session_cmd::run_list(&memory).await,
+                    Some(SessionAction::Clean { before }) => {
+                        cli::session_cmd::run_clean(&memory, &before).await
+                    }
+                    Some(SessionAction::Delete { chat_id }) => {
+                        cli::session_cmd::run_delete(&memory, &chat_id).await
+                    }
+                }
+            })
+            .await
+        }
     }
 }
 
@@ -117,7 +178,13 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
         )
     })?;
 
-    let mut config = config::AppConfig::load(config_path.to_str().unwrap())?;
+    let config_str = config_path.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "config path contains invalid UTF-8: {}",
+            config_path.display()
+        )
+    })?;
+    let mut config = config::AppConfig::load(config_str)?;
 
     // Resolve relative paths against anqclaw home
     config.app.workspace = resolve_path(&home, &config.app.workspace)
@@ -183,7 +250,7 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
     );
 
     // Create LLM client
-    let llm = create_llm_client(&config.llm);
+    let llm = create_llm_client(&config.llm)?;
     tracing::info!(
         provider = config.llm.provider.as_str(),
         model = config.llm.model.as_str(),
@@ -193,7 +260,7 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
     // Create fallback LLM client if configured
     let fallback_llm = if !config.agent.fallback_profile.is_empty() {
         if let Some(fallback_config) = config.llm_profiles.get(&config.agent.fallback_profile) {
-            Some(create_llm_client(fallback_config))
+            Some(create_llm_client(fallback_config)?)
         } else {
             tracing::warn!(
                 profile = config.agent.fallback_profile.as_str(),
@@ -240,11 +307,14 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
     };
 
     // Create ToolRegistry & AgentCore
+    let llm_profile_names: Vec<String> = config.llm_profiles.keys().cloned().collect();
     let tools = Arc::new(ToolRegistry::new(
         &config.tools,
         &config.security,
         memory.clone(),
         skill_registry.clone(),
+        llm_profile_names,
+        Some(&config.skills),
     ));
     let agent = Arc::new(AgentCore::new(
         llm,
@@ -265,6 +335,36 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
     })
 }
 
+/// Lightweight bootstrap for session management commands that only need MemoryStore.
+async fn run_session_cmd<F, Fut>(cli_config: Option<String>, f: F) -> anyhow::Result<()>
+where
+    F: FnOnce(Arc<MemoryStore>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let home = anqclaw_home();
+    ensure_dirs(&home)?;
+
+    let config_path = find_config(cli_config.as_deref()).ok_or_else(|| {
+        anyhow::anyhow!("No config file found. Run `anqclaw onboard` to create one.")
+    })?;
+
+    let config_str = config_path.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "config path contains invalid UTF-8: {}",
+            config_path.display()
+        )
+    })?;
+    let mut config = config::AppConfig::load(config_str)?;
+    config.memory.db_path = resolve_path(&home, &config.memory.db_path)
+        .to_string_lossy()
+        .into_owned();
+
+    let memory = Arc::new(MemoryStore::new(&config.memory.db_path).await?);
+    let result = f(memory.clone()).await;
+    memory.close().await;
+    result
+}
+
 // ─── `anqclaw serve` ────────────────────────────────────────────────────────
 
 async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
@@ -272,6 +372,23 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
 
     // Create channels (feishu is optional)
     let mut channels: Vec<Arc<dyn Channel>> = Vec::new();
+
+    // Spawn skills hot-reload watcher (must be held alive)
+    let _skill_watcher = if let Some(ref registry) = bs.skill_registry {
+        match skill::spawn_skill_watcher(registry.clone()) {
+            Ok(w) => {
+                tracing::info!("skills hot-reload watcher started");
+                Some(w)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to start skills hot-reload watcher");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     if let Some(ref feishu_cfg) = bs.config.feishu {
         let feishu_channel: Arc<dyn Channel> = Arc::new(FeishuChannel::new(feishu_cfg));
         channels.push(feishu_channel);
@@ -280,9 +397,18 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
         tracing::info!("feishu channel not configured — skipping");
     }
 
+    // Create & spawn Gateway
+    let app_metrics = Arc::new(metrics::Metrics::new());
+
     // HTTP channel (optional)
     if bs.config.http_channel.enabled {
-        let http_channel: Arc<dyn Channel> = Arc::new(HttpChannel::new(&bs.config.http_channel));
+        let http_channel: Arc<dyn Channel> = Arc::new(HttpChannel::new(
+            &bs.config.http_channel,
+            Some(bs.agent.clone()),
+            Some(bs.memory.clone()),
+            Some(bs.config.clone()),
+            Some(app_metrics.clone()),
+        ));
         channels.push(http_channel);
         tracing::info!(bind = %bs.config.http_channel.bind, "http channel enabled");
     }
@@ -291,12 +417,12 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
         tracing::warn!("no channels configured — only heartbeat/scheduler will run (if enabled)");
     }
 
-    // Create & spawn Gateway
     let gateway = Gateway::new(
         channels.clone(),
         bs.agent.clone(),
         bs.memory.clone(),
         bs.config.clone(),
+        app_metrics,
     );
     let gw = gateway.clone();
     let gateway_handle = tokio::spawn(async move {
@@ -384,11 +510,13 @@ async fn run_chat(cli_config: Option<String>, message: Option<String>) -> anyhow
     let cli_channel: Arc<dyn Channel> = Arc::new(CliChannel::new(message));
     let channels: Vec<Arc<dyn Channel>> = vec![cli_channel];
 
+    let app_metrics = Arc::new(metrics::Metrics::new());
     let gateway = Gateway::new(
         channels,
         bs.agent.clone(),
         bs.memory.clone(),
         bs.config.clone(),
+        app_metrics,
     );
 
     if is_single_shot {

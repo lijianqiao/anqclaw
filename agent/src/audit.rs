@@ -17,6 +17,7 @@ pub enum AuditEvent {
     #[serde(rename = "tool_call")]
     ToolCall {
         timestamp: String,
+        trace_id: String,
         chat_id: String,
         tool_name: String,
         arguments: serde_json::Value,
@@ -27,6 +28,7 @@ pub enum AuditEvent {
     #[serde(rename = "llm_call")]
     LlmCall {
         timestamp: String,
+        trace_id: String,
         chat_id: String,
         model: String,
         input_messages: usize,
@@ -64,6 +66,7 @@ impl AuditLogger {
     /// Log a tool call event.
     pub fn log_tool_call(
         &self,
+        trace_id: &str,
         chat_id: &str,
         tool_name: &str,
         arguments: &serde_json::Value,
@@ -71,7 +74,6 @@ impl AuditLogger {
         is_error: bool,
         duration_ms: u64,
     ) {
-        // Truncate result preview to avoid huge log entries
         let preview = if result.len() > 500 {
             format!("{}...[truncated]", &result[..500])
         } else {
@@ -80,6 +82,7 @@ impl AuditLogger {
 
         let event = AuditEvent::ToolCall {
             timestamp: Utc::now().to_rfc3339(),
+            trace_id: trace_id.to_string(),
             chat_id: chat_id.to_string(),
             tool_name: tool_name.to_string(),
             arguments: arguments.clone(),
@@ -94,6 +97,7 @@ impl AuditLogger {
     /// Log an LLM call event.
     pub fn log_llm_call(
         &self,
+        trace_id: &str,
         chat_id: &str,
         model: &str,
         input_messages: usize,
@@ -103,6 +107,7 @@ impl AuditLogger {
     ) {
         let event = AuditEvent::LlmCall {
             timestamp: Utc::now().to_rfc3339(),
+            trace_id: trace_id.to_string(),
             chat_id: chat_id.to_string(),
             model: model.to_string(),
             input_messages,

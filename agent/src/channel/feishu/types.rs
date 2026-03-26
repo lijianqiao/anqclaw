@@ -150,7 +150,7 @@ impl MsgReceivePayload {
             "image" => {
                 let v: serde_json::Value = serde_json::from_str(&lark_msg.content).ok()?;
                 let key = v.get("image_key").and_then(|k| k.as_str())?.to_string();
-                MessageContent::Image { key }
+                MessageContent::Image { key, image_data: None }
             }
             "file" => {
                 let v: serde_json::Value = serde_json::from_str(&lark_msg.content).ok()?;
@@ -160,7 +160,7 @@ impl MsgReceivePayload {
                     .and_then(|n| n.as_str())
                     .unwrap_or("unknown")
                     .to_string();
-                MessageContent::File { key, name }
+                MessageContent::File { key, name, file_bytes: None }
             }
             "post" => {
                 // Rich text (post) — extract plain text from structured content
@@ -183,6 +183,8 @@ impl MsgReceivePayload {
             message_id: lark_msg.message_id,
             content,
             timestamp: chrono::Utc::now().timestamp(),
+            trace_id: String::new(),
+            images: vec![],
         })
     }
 }

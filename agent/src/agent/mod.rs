@@ -13,11 +13,12 @@ use anyhow::Result;
 
 use crate::audit::AuditLogger;
 use crate::config::AppConfig;
-use crate::llm::LlmClient;
+use crate::llm::{LlmClient, create_llm_client};
 use crate::memory::MemoryStore;
 use crate::skill::SkillRegistry;
+use crate::token;
 use crate::tool::ToolRegistry;
-use crate::types::{ChatMessage, InboundMessage, OutboundMessage};
+use crate::types::{ChatMessage, ImageData, InboundMessage, OutboundMessage, StreamEvent};
 
 use context::{build_system_prompt, format_memories};
 
@@ -71,10 +72,27 @@ impl AgentCore {
         msg: &InboundMessage,
         history: &[ChatMessage],
     ) -> (OutboundMessage, Vec<ChatMessage>) {
-        match self.do_handle(msg, history).await {
+        match self.do_handle(msg, history, None).await {
             Ok((reply, messages)) => (reply, messages),
             Err(e) => {
                 tracing::error!(error = %e, "agent handle failed");
+                let reply = OutboundMessage::error(msg, &format!("处理失败: {e}"));
+                (reply, vec![])
+            }
+        }
+    }
+
+    /// Streaming variant — forwards text deltas through `stream_tx`.
+    pub async fn handle_streaming(
+        &self,
+        msg: &InboundMessage,
+        history: &[ChatMessage],
+        stream_tx: tokio::sync::mpsc::Sender<String>,
+    ) -> (OutboundMessage, Vec<ChatMessage>) {
+        match self.do_handle(msg, history, Some(stream_tx)).await {
+            Ok((reply, messages)) => (reply, messages),
+            Err(e) => {
+                tracing::error!(error = %e, "agent streaming handle failed");
                 let reply = OutboundMessage::error(msg, &format!("处理失败: {e}"));
                 (reply, vec![])
             }
@@ -85,6 +103,7 @@ impl AgentCore {
         &self,
         msg: &InboundMessage,
         history: &[ChatMessage],
+        stream_tx: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<(OutboundMessage, Vec<ChatMessage>)> {
         // 1. Build system prompt (with skill summaries if available)
         let skill_summary = self.skill_registry
@@ -116,9 +135,64 @@ impl AgentCore {
         // History (from SQLite)
         messages.extend_from_slice(history);
 
-        // Current user message
-        let user_msg = ChatMessage::user(&user_text);
+        // Current user message (with image data if available)
+        let image_data: Vec<ImageData> = msg.images.clone();
+        let user_msg = ChatMessage::user_with_images(&user_text, image_data);
         messages.push(user_msg);
+
+        // Token budget: trim history if it exceeds max_tokens_per_conversation
+        let token_budget = self.config.limits.max_tokens_per_conversation;
+        if token_budget > 0 {
+            // Find where system messages end
+            let system_end = messages
+                .iter()
+                .position(|m| !matches!(m.role, crate::types::Role::System))
+                .unwrap_or(messages.len());
+
+            // Calculate total estimated tokens
+            let total_tokens: usize = messages
+                .iter()
+                .map(|m| token::estimate_message_tokens("msg", &m.content))
+                .sum();
+
+            if total_tokens as u64 > token_budget {
+                // Keep: system messages + last message (current user). Trim history from oldest.
+                let system_tokens: usize = messages[..system_end]
+                    .iter()
+                    .map(|m| token::estimate_message_tokens("msg", &m.content))
+                    .sum();
+                let last_tokens = messages.last()
+                    .map(|m| token::estimate_message_tokens("msg", &m.content))
+                    .unwrap_or(0);
+                let budget_for_history = token_budget
+                    .saturating_sub(system_tokens as u64 + last_tokens as u64);
+
+                // Scan history from newest to oldest
+                let history_end = messages.len().saturating_sub(1);
+                let mut accumulated = 0u64;
+                let mut keep_from = system_end;
+                for i in (system_end..history_end).rev() {
+                    let msg_tokens = token::estimate_message_tokens("msg", &messages[i].content) as u64;
+                    if accumulated + msg_tokens > budget_for_history {
+                        keep_from = i + 1;
+                        break;
+                    }
+                    accumulated += msg_tokens;
+                    keep_from = i;
+                }
+
+                let remove_count = keep_from - system_end;
+                if remove_count > 0 {
+                    messages.drain(system_end..keep_from);
+                    tracing::info!(
+                        trimmed = remove_count,
+                        total_est = total_tokens,
+                        budget = token_budget,
+                        "history trimmed to fit token budget"
+                    );
+                }
+            }
+        }
 
         // Track new messages for persistence (everything after history)
         // We'll collect all new messages (user + assistant + tool rounds)
@@ -129,16 +203,49 @@ impl AgentCore {
 
         // 5. Agentic loop
         let max_rounds = self.config.agent.max_tool_rounds;
+        let mut current_llm: Arc<dyn LlmClient> = self.llm.clone();
+        let mut current_fallback: Option<Arc<dyn LlmClient>> = self.fallback_llm.clone();
+        let mut current_model_name = self.config.llm.model.clone();
         for round in 0..max_rounds {
             let llm_start = std::time::Instant::now();
-            let response = match self.llm.chat(&messages, &tool_defs).await {
-                Ok(r) => r,
-                Err(e) => {
-                    if let Some(ref fallback) = self.fallback_llm {
-                        tracing::warn!(error = %e, "primary LLM failed, trying fallback");
-                        fallback.chat(&messages, &tool_defs).await?
-                    } else {
-                        return Err(e);
+            let response = if stream_tx.is_some() {
+                // Streaming path: use chat_stream, forward deltas
+                let mut rx = match current_llm.chat_stream(&messages, &tool_defs).await {
+                    Ok(rx) => rx,
+                    Err(e) => {
+                        if let Some(ref fallback) = current_fallback {
+                            tracing::warn!(error = %e, "primary LLM failed, trying fallback (stream)");
+                            fallback.chat_stream(&messages, &tool_defs).await?
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
+                let mut final_resp = None;
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        StreamEvent::Delta(text) => {
+                            if let Some(ref tx) = stream_tx {
+                                let _ = tx.send(text).await;
+                            }
+                        }
+                        StreamEvent::Done(resp) => {
+                            final_resp = Some(resp);
+                        }
+                    }
+                }
+                final_resp.ok_or_else(|| anyhow::anyhow!("stream ended without Done event"))?
+            } else {
+                // Non-streaming path (original)
+                match current_llm.chat(&messages, &tool_defs).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        if let Some(ref fallback) = current_fallback {
+                            tracing::warn!(error = %e, "primary LLM failed, trying fallback");
+                            fallback.chat(&messages, &tool_defs).await?
+                        } else {
+                            return Err(e);
+                        }
                     }
                 }
             };
@@ -152,8 +259,9 @@ impl AgentCore {
                 && self.config.audit.log_llm_calls
             {
                 audit.log_llm_call(
+                    &msg.trace_id,
                     &msg.chat_id,
-                    &self.config.llm.model,
+                    &current_model_name,
                     messages.len(),
                     has_tool_calls,
                     has_text,
@@ -183,11 +291,17 @@ impl AgentCore {
                 if let Some(ref audit) = self.audit
                     && self.config.audit.log_tool_calls
                 {
-                    // Distribute total batch time equally as approximation;
-                    // for precise per-tool timing, execute_batch would need to return durations.
                     let per_tool_ms = tools_duration_ms / results.len().max(1) as u64;
                     for (call, result) in response.tool_calls.iter().zip(results.iter()) {
+                        // Respect fine-grained audit flags
+                        if call.name == "shell_exec" && !self.config.audit.log_shell_commands {
+                            continue;
+                        }
+                        if call.name == "file_write" && !self.config.audit.log_file_writes {
+                            continue;
+                        }
                         audit.log_tool_call(
+                            &msg.trace_id,
                             &msg.chat_id,
                             &call.name,
                             &call.arguments,
@@ -203,10 +317,39 @@ impl AgentCore {
                     messages.push(ChatMessage::tool_result(result));
                 }
 
+                // Check if switch_model was called — swap client for subsequent rounds
+                for (call, result) in response.tool_calls.iter().zip(results.iter()) {
+                    if call.name == "switch_model" && !result.is_error {
+                        if let Some(profile_name) = result.output.strip_prefix("__switch_model:") {
+                            if let Some(profile_cfg) = self.config.llm_profiles.get(profile_name) {
+                                match create_llm_client(profile_cfg) {
+                                    Ok(new_llm) => {
+                                        current_llm = new_llm;
+                                        current_fallback = None;
+                                        current_model_name = profile_cfg.model.clone();
+                                        tracing::info!(
+                                            profile = profile_name,
+                                            model = %current_model_name,
+                                            "switched LLM profile mid-session"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            profile = profile_name,
+                                            "failed to create LLM client for profile switch"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Continue loop — let LLM see the results
             } else if has_text {
                 // Pure text response — done
-                let mut text = response.text.unwrap();
+                let mut text = response.text.unwrap_or_default();
 
                 // Apply redaction if enabled
                 if self.config.security.auto_redact_secrets {
@@ -332,6 +475,8 @@ max_tool_rounds = 3
             message_id: "msg_test".into(),
             content: MessageContent::Text("你好".into()),
             timestamp: 0,
+            trace_id: String::new(),
+            images: vec![],
         }
     }
 
@@ -347,7 +492,7 @@ max_tool_rounds = 3
             tool_calls: vec![],
         }]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None));
+        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None, vec![], None));
         let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
 
         let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
@@ -380,7 +525,7 @@ max_tool_rounds = 3
             },
         ]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None));
+        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None, vec![], None));
         let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
 
         let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
@@ -405,7 +550,7 @@ max_tool_rounds = 3
             }],
         }]));
 
-        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None));
+        let tools = Arc::new(ToolRegistry::new(&config.tools, &config.security, memory.clone(), None, vec![], None));
         let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None);
 
         let (reply, _persist) = agent.handle(&test_inbound(), &[]).await;

@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crate::config::LlmSection;
-use crate::types::{ChatMessage, LlmResponse, Role, ToolCall, ToolDefinition};
+use crate::types::{ChatMessage, LlmResponse, Role, StreamEvent, ToolCall, ToolDefinition};
 
 use super::LlmClient;
 
@@ -120,6 +120,139 @@ impl OpenAiCompatClient {
 
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenAI-compat request failed after retries")))
     }
+
+    /// Streaming version — sends SSE request, returns a channel of StreamEvents.
+    async fn do_chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
+        let req_messages: Vec<OaiMessage> = messages.iter().map(to_oai_message).collect();
+
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "messages": req_messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "stream": true,
+        });
+
+        if self.supports_tools && !tools.is_empty() {
+            let req_tools: Vec<OaiTool> = tools.iter().map(to_oai_tool).collect();
+            body["tools"] = serde_json::to_value(&req_tools)?;
+        }
+
+        let mut req = self
+            .http
+            .post(&self.endpoint)
+            .header("Content-Type", "application/json");
+
+        if !self.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.api_key));
+        }
+
+        let response = req.json(&body).send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenAI-compat streaming error HTTP {status}: {text}");
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            let mut full_text = String::new();
+            let mut tc_acc: std::collections::HashMap<usize, (String, String, String)> =
+                std::collections::HashMap::new();
+            let mut response = response;
+            let mut done = false;
+
+            while !done {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                    _ => break,
+                }
+
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].trim_end().to_string();
+                    buffer = buffer[pos + 1..].to_string();
+
+                    let data = match line.strip_prefix("data: ") {
+                        Some(d) => d,
+                        None => continue,
+                    };
+
+                    if data == "[DONE]" {
+                        done = true;
+                        break;
+                    }
+
+                    let Ok(chunk) = serde_json::from_str::<OaiStreamChunk>(data) else {
+                        continue;
+                    };
+
+                    if let Some(choice) = chunk.choices.first() {
+                        if let Some(ref content) = choice.delta.content {
+                            if !content.is_empty() {
+                                full_text.push_str(content);
+                                let _ = tx.send(StreamEvent::Delta(content.clone())).await;
+                            }
+                        }
+                        if let Some(ref tcs) = choice.delta.tool_calls {
+                            for tc in tcs {
+                                let entry = tc_acc.entry(tc.index).or_default();
+                                if let Some(ref id) = tc.id {
+                                    entry.0.clone_from(id);
+                                }
+                                if let Some(ref f) = tc.function {
+                                    if let Some(ref name) = f.name {
+                                        entry.1.clone_from(name);
+                                    }
+                                    if let Some(ref args) = f.arguments {
+                                        entry.2.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Build tool calls from accumulated data
+            let mut tool_calls = Vec::new();
+            let mut keys: Vec<usize> = tc_acc.keys().copied().collect();
+            keys.sort();
+            for k in keys {
+                let (id, name, args) = match tc_acc.remove(&k) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let arguments =
+                    serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+                tool_calls.push(ToolCall {
+                    id,
+                    name,
+                    arguments,
+                });
+            }
+
+            let resp = LlmResponse {
+                text: if full_text.is_empty() {
+                    None
+                } else {
+                    Some(full_text)
+                },
+                tool_calls,
+            };
+            let _ = tx.send(StreamEvent::Done(resp)).await;
+        });
+
+        Ok(rx)
+    }
 }
 
 impl LlmClient for OpenAiCompatClient {
@@ -129,6 +262,14 @@ impl LlmClient for OpenAiCompatClient {
         tools: &'a [ToolDefinition],
     ) -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + 'a>> {
         Box::pin(self.do_chat(messages, tools))
+    }
+
+    fn chat_stream<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        tools: &'a [ToolDefinition],
+    ) -> Pin<Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>> {
+        Box::pin(self.do_chat_stream(messages, tools))
     }
 }
 
@@ -172,11 +313,33 @@ fn build_endpoint(base_url: &str) -> String {
 struct OaiMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<OaiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OaiToolCallRequest>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+}
+
+/// OpenAI content can be a simple string or an array of content parts (for vision).
+#[derive(Serialize)]
+#[serde(untagged)]
+enum OaiContent {
+    Text(String),
+    Parts(Vec<OaiContentPart>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum OaiContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: OaiImageUrl },
+}
+
+#[derive(Serialize)]
+struct OaiImageUrl {
+    url: String, // "data:<media_type>;base64,<data>"
 }
 
 #[derive(Serialize)]
@@ -244,16 +407,41 @@ fn to_oai_message(msg: &ChatMessage) -> OaiMessage {
     match msg.role {
         Role::System => OaiMessage {
             role: "system".into(),
-            content: Some(msg.content.clone()),
+            content: Some(OaiContent::Text(msg.content.clone())),
             tool_calls: None,
             tool_call_id: None,
         },
-        Role::User => OaiMessage {
-            role: "user".into(),
-            content: Some(msg.content.clone()),
-            tool_calls: None,
-            tool_call_id: None,
-        },
+        Role::User => {
+            // Check if this user message has image attachments
+            if let Some(ref images) = msg.images {
+                let mut parts = Vec::new();
+                for img in images {
+                    parts.push(OaiContentPart::ImageUrl {
+                        image_url: OaiImageUrl {
+                            url: format!("data:{};base64,{}", img.media_type, img.data),
+                        },
+                    });
+                }
+                if !msg.content.is_empty() {
+                    parts.push(OaiContentPart::Text {
+                        text: msg.content.clone(),
+                    });
+                }
+                OaiMessage {
+                    role: "user".into(),
+                    content: Some(OaiContent::Parts(parts)),
+                    tool_calls: None,
+                    tool_call_id: None,
+                }
+            } else {
+                OaiMessage {
+                    role: "user".into(),
+                    content: Some(OaiContent::Text(msg.content.clone())),
+                    tool_calls: None,
+                    tool_call_id: None,
+                }
+            }
+        }
         Role::Assistant => {
             let tool_calls = msg.tool_calls.as_ref().map(|calls| {
                 calls
@@ -274,7 +462,7 @@ fn to_oai_message(msg: &ChatMessage) -> OaiMessage {
                 content: if msg.content.is_empty() {
                     None
                 } else {
-                    Some(msg.content.clone())
+                    Some(OaiContent::Text(msg.content.clone()))
                 },
                 tool_calls,
                 tool_call_id: None,
@@ -282,7 +470,7 @@ fn to_oai_message(msg: &ChatMessage) -> OaiMessage {
         }
         Role::Tool => OaiMessage {
             role: "tool".into(),
-            content: Some(msg.content.clone()),
+            content: Some(OaiContent::Text(msg.content.clone())),
             tool_calls: None,
             tool_call_id: msg.tool_call_id.clone(),
         },
@@ -325,6 +513,43 @@ fn parse_oai_response(resp: OaiResponse) -> Result<LlmResponse> {
         .collect();
 
     Ok(LlmResponse { text, tool_calls })
+}
+
+// ─── Streaming response types ────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct OaiStreamChunk {
+    choices: Vec<OaiStreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct OaiStreamChoice {
+    delta: OaiStreamDelta,
+}
+
+#[derive(Deserialize)]
+struct OaiStreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OaiStreamToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct OaiStreamToolCall {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OaiStreamFunction>,
+}
+
+#[derive(Deserialize)]
+struct OaiStreamFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

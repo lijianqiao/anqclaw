@@ -104,10 +104,7 @@ impl Scheduler {
             return Ok(());
         }
 
-        tracing::info!(
-            count = self.tasks.len(),
-            "scheduler: started"
-        );
+        tracing::info!(count = self.tasks.len(), "scheduler: started");
 
         // Track last-fired time for each task to prevent double-firing
         let mut last_fired: Vec<chrono::DateTime<Utc>> = vec![Utc::now(); self.tasks.len()];
@@ -154,6 +151,8 @@ impl Scheduler {
             message_id: String::new(),
             content: crate::types::MessageContent::Text(prompt),
             timestamp: Utc::now().timestamp(),
+            trace_id: String::new(),
+            images: vec![],
         };
 
         // Load task-specific history
@@ -197,7 +196,11 @@ impl Scheduler {
         reply.chat_id = task.config.notify_chat_id.clone();
         reply.channel = task.config.notify_channel.clone();
 
-        if let Some(ch) = self.channels.iter().find(|c| c.name() == task.config.notify_channel) {
+        if let Some(ch) = self
+            .channels
+            .iter()
+            .find(|c| c.name() == task.config.notify_channel)
+        {
             if let Err(e) = ch.send_message(reply).await {
                 tracing::error!(
                     name = %task.config.name,

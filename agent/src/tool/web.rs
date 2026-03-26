@@ -166,3 +166,55 @@ fn collapse_whitespace(input: &str) -> String {
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_web() -> WebFetch {
+        WebFetch::new(10, 1024, vec!["localhost".to_string(), "169.254.169.254".to_string()])
+    }
+
+    #[test]
+    fn test_blocked_domain() {
+        let web = make_web();
+        let result = web.check_domain("http://localhost:8080/api");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("blocked"));
+    }
+
+    #[test]
+    fn test_blocked_metadata_ip() {
+        let web = make_web();
+        let result = web.check_domain("http://169.254.169.254/latest/meta-data");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_private_ip_blocked() {
+        let web = make_web();
+        let result = web.check_domain("http://10.0.0.1/internal");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_loopback_blocked() {
+        let web = make_web();
+        let result = web.check_domain("http://127.0.0.1/admin");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_public_domain_allowed() {
+        let web = make_web();
+        let result = web.check_domain("https://example.com/page");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_collapse_whitespace() {
+        let input = "hello   world\n\n\n\nfoo";
+        let result = collapse_whitespace(input);
+        assert_eq!(result, "hello world\n\nfoo");
+    }
+}

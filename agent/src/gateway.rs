@@ -5,6 +5,7 @@
 //! TODO(future): When splitting into workspace crates, extract into `crates/gateway/`.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use dashmap::DashMap;
 use lru::LruCache;
@@ -16,7 +17,8 @@ use crate::agent::AgentCore;
 use crate::channel::Channel;
 use crate::config::AppConfig;
 use crate::memory::MemoryStore;
-use crate::types::InboundMessage;
+use crate::metrics::Metrics;
+use crate::types::{InboundMessage, OutboundMessage};
 
 // ─── Gateway ─────────────────────────────────────────────────────────────────
 
@@ -25,10 +27,13 @@ pub struct Gateway {
     agent: Arc<AgentCore>,
     memory: Arc<MemoryStore>,
     config: Arc<AppConfig>,
+    metrics: Arc<Metrics>,
     /// Per-chat mutex to serialise processing within the same conversation.
     chat_locks: DashMap<String, Arc<Mutex<()>>>,
     /// Recent message IDs for dedup (LRU, capacity 1000).
     recent_ids: Mutex<LruCache<String, ()>>,
+    /// Per-chat sliding-window rate limiter: chat_id → list of request timestamps.
+    rate_limiter: DashMap<String, Vec<Instant>>,
 }
 
 impl Gateway {
@@ -37,14 +42,17 @@ impl Gateway {
         agent: Arc<AgentCore>,
         memory: Arc<MemoryStore>,
         config: Arc<AppConfig>,
+        metrics: Arc<Metrics>,
     ) -> Arc<Self> {
         Arc::new(Self {
             channels,
             agent,
             memory,
             config,
+            metrics,
             chat_locks: DashMap::new(),
-            recent_ids: Mutex::new(LruCache::new(NonZero::new(1000).unwrap())),
+            recent_ids: Mutex::new(LruCache::new(NonZero::new(1000).expect("1000 is non-zero"))),
+            rate_limiter: DashMap::new(),
         })
     }
 
@@ -118,7 +126,61 @@ impl Gateway {
     }
 
     async fn process_message(&self, msg: InboundMessage) {
+        // Assign trace_id if not already set
+        let mut msg = msg;
+        if msg.trace_id.is_empty() {
+            msg.trace_id = uuid::Uuid::new_v4().to_string();
+        }
+
+        // Metrics: count request
+        self.metrics.total_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let session_key = self.session_key(&msg);
+
+        // Rate limiting: sliding window per session_key
+        let max_rpm = self.config.limits.max_requests_per_minute;
+        if max_rpm > 0 {
+            let now = Instant::now();
+            let window = std::time::Duration::from_secs(60);
+            let mut entry = self.rate_limiter.entry(session_key.clone()).or_default();
+            // Prune timestamps outside the window
+            entry.retain(|t| now.duration_since(*t) < window);
+            if entry.len() >= max_rpm as usize {
+                tracing::warn!(
+                    session_key = %session_key,
+                    limit = max_rpm,
+                    "rate limit exceeded"
+                );
+                let reply = OutboundMessage::error(&msg, "请求过于频繁，请稍后再试");
+                if let Some(ch) = self.channels.iter().find(|c| c.name() == msg.channel) {
+                    let _ = ch.send_message(reply).await;
+                }
+                return;
+            }
+            entry.push(now);
+        }
+
+        // Message length validation
+        let max_len = self.config.limits.max_message_length as usize;
+        if max_len > 0 {
+            let text = msg.content.to_text();
+            if text.len() > max_len {
+                tracing::warn!(
+                    session_key = %session_key,
+                    len = text.len(),
+                    max = max_len,
+                    "message too long, rejecting"
+                );
+                let reply = OutboundMessage::error(
+                    &msg,
+                    &format!("消息过长（{} 字符），最大允许 {} 字符", text.len(), max_len),
+                );
+                if let Some(ch) = self.channels.iter().find(|c| c.name() == msg.channel) {
+                    let _ = ch.send_message(reply).await;
+                }
+                return;
+            }
+        }
 
         // Per-chat lock: serialise processing within the same conversation
         let lock = self

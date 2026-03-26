@@ -15,7 +15,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crate::config::LlmSection;
-use crate::types::{ChatMessage, LlmResponse, Role, ToolCall, ToolDefinition};
+use crate::types::{ChatMessage, LlmResponse, Role, StreamEvent, ToolCall, ToolDefinition};
 
 use super::LlmClient;
 
@@ -87,6 +87,7 @@ impl AnthropicClient {
             } else {
                 Some(ant_tools)
             },
+            stream: None,
         };
 
         // Anthropic requires `messages` to be non-empty and start with a user message.
@@ -148,6 +149,201 @@ impl AnthropicClient {
 
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Anthropic request failed after retries")))
     }
+
+    /// Streaming version — sends SSE request, returns a channel of StreamEvents.
+    async fn do_chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
+        let system_text: String = messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let ant_messages: Vec<AntMessage> = messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .map(to_ant_message)
+            .collect();
+
+        let ant_tools: Vec<AntTool> = tools.iter().map(to_ant_tool).collect();
+
+        let mut body = AntRequest {
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+            temperature: Some(self.temperature),
+            system: if system_text.is_empty() {
+                None
+            } else {
+                Some(system_text)
+            },
+            messages: ant_messages,
+            tools: if ant_tools.is_empty() {
+                None
+            } else {
+                Some(ant_tools)
+            },
+            stream: Some(true),
+        };
+
+        if body.messages.is_empty() {
+            body.messages.push(AntMessage {
+                role: "user".into(),
+                content: AntContent::Text("(no user input)".into()),
+            });
+        }
+
+        let resp = self
+            .http
+            .post(ANTHROPIC_API_URL)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Anthropic streaming error HTTP {status}: {text}");
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            let mut full_text = String::new();
+            let mut tc_acc: std::collections::HashMap<usize, (String, String, String)> =
+                std::collections::HashMap::new();
+            let mut response = resp;
+            let mut done = false;
+
+            while !done {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                    _ => break,
+                }
+
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].trim_end().to_string();
+                    buffer = buffer[pos + 1..].to_string();
+
+                    let data = match line.strip_prefix("data: ") {
+                        Some(d) => d,
+                        None => continue,
+                    };
+
+                    let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+                        continue;
+                    };
+
+                    let event_type = event
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    match event_type {
+                        "content_block_delta" => {
+                            let delta = &event["delta"];
+                            let delta_type =
+                                delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            match delta_type {
+                                "text_delta" => {
+                                    if let Some(text) =
+                                        delta.get("text").and_then(|v| v.as_str())
+                                    {
+                                        if !text.is_empty() {
+                                            full_text.push_str(text);
+                                            let _ = tx
+                                                .send(StreamEvent::Delta(text.to_string()))
+                                                .await;
+                                        }
+                                    }
+                                }
+                                "input_json_delta" => {
+                                    let index = event
+                                        .get("index")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0)
+                                        as usize;
+                                    if let Some(partial) =
+                                        delta.get("partial_json").and_then(|v| v.as_str())
+                                    {
+                                        tc_acc.entry(index).or_default().2.push_str(partial);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        "content_block_start" => {
+                            let block = &event["content_block"];
+                            let block_type =
+                                block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            if block_type == "tool_use" {
+                                let index = event
+                                    .get("index")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0)
+                                    as usize;
+                                let id = block
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let name = block
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                tc_acc.insert(index, (id, name, String::new()));
+                            }
+                        }
+                        "message_stop" => {
+                            done = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Build tool calls
+            let mut tool_calls = Vec::new();
+            let mut keys: Vec<usize> = tc_acc.keys().copied().collect();
+            keys.sort();
+            for k in keys {
+                let (id, name, args) = match tc_acc.remove(&k) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let arguments =
+                    serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+                tool_calls.push(ToolCall {
+                    id,
+                    name,
+                    arguments,
+                });
+            }
+
+            let resp = LlmResponse {
+                text: if full_text.is_empty() {
+                    None
+                } else {
+                    Some(full_text)
+                },
+                tool_calls,
+            };
+            let _ = tx.send(StreamEvent::Done(resp)).await;
+        });
+
+        Ok(rx)
+    }
 }
 
 impl LlmClient for AnthropicClient {
@@ -157,6 +353,14 @@ impl LlmClient for AnthropicClient {
         tools: &'a [ToolDefinition],
     ) -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + 'a>> {
         Box::pin(self.do_chat(messages, tools))
+    }
+
+    fn chat_stream<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        tools: &'a [ToolDefinition],
+    ) -> Pin<Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>> {
+        Box::pin(self.do_chat_stream(messages, tools))
     }
 }
 
@@ -175,6 +379,8 @@ struct AntRequest {
     messages: Vec<AntMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AntTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -196,6 +402,8 @@ enum AntContent {
 enum AntContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: AntImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -209,6 +417,14 @@ enum AntContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+}
+
+#[derive(Serialize)]
+struct AntImageSource {
+    #[serde(rename = "type")]
+    source_type: String, // "base64"
+    media_type: String,  // e.g. "image/jpeg"
+    data: String,        // base64-encoded image bytes
 }
 
 #[derive(Serialize)]
@@ -249,10 +465,35 @@ fn to_ant_message(msg: &ChatMessage) -> AntMessage {
                 content: AntContent::Text(msg.content.clone()),
             }
         }
-        Role::User => AntMessage {
-            role: "user".into(),
-            content: AntContent::Text(msg.content.clone()),
-        },
+        Role::User => {
+            // Check if this user message has image attachments
+            if let Some(ref images) = msg.images {
+                let mut blocks = Vec::new();
+                for img in images {
+                    blocks.push(AntContentBlock::Image {
+                        source: AntImageSource {
+                            source_type: "base64".into(),
+                            media_type: img.media_type.clone(),
+                            data: img.data.clone(),
+                        },
+                    });
+                }
+                if !msg.content.is_empty() {
+                    blocks.push(AntContentBlock::Text {
+                        text: msg.content.clone(),
+                    });
+                }
+                AntMessage {
+                    role: "user".into(),
+                    content: AntContent::Blocks(blocks),
+                }
+            } else {
+                AntMessage {
+                    role: "user".into(),
+                    content: AntContent::Text(msg.content.clone()),
+                }
+            }
+        }
         Role::Assistant => {
             match &msg.tool_calls {
                 Some(calls) if !calls.is_empty() => {
