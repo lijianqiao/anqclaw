@@ -103,6 +103,9 @@ fn default_memory_tool_enabled() -> bool {
 fn default_memory_tool_search_limit() -> u32 {
     5
 }
+fn default_pdf_read_max_chars() -> u32 {
+    50000
+}
 fn default_shell_permission_level() -> String {
     "supervised".to_string()
 }
@@ -539,6 +542,16 @@ pub struct ToolsSection {
     #[serde(default = "default_memory_tool_search_limit")]
     pub memory_tool_search_limit: u32,
 
+    // PDF extraction (requires rag-pdf feature)
+    #[serde(default = "default_true")]
+    pub pdf_read_enabled: bool,
+    #[serde(default = "default_pdf_read_max_chars")]
+    pub pdf_read_max_chars: u32,
+
+    // Image info tool
+    #[serde(default = "default_true")]
+    pub image_info_enabled: bool,
+
     /// Custom external tools defined in config.
     #[serde(default)]
     pub custom: Vec<CustomToolConfig>,
@@ -575,6 +588,9 @@ impl Default for ToolsSection {
             web_blocked_domains: default_web_blocked_domains(),
             memory_tool_enabled: default_memory_tool_enabled(),
             memory_tool_search_limit: default_memory_tool_search_limit(),
+            pdf_read_enabled: default_true(),
+            pdf_read_max_chars: default_pdf_read_max_chars(),
+            image_info_enabled: default_true(),
             custom: vec![],
         }
     }

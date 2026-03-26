@@ -33,6 +33,11 @@ axum = { version = "0.8", features = ["multipart"] }
 tokio-stream = "0.1"
 base64 = "0.22"
 notify = "7"
+pdf-extract = { version = "0.7", optional = true }
+
+[features]
+default = []
+rag-pdf = ["pdf-extract"]
 
 [dev-dependencies]
 tower = "0.5"

@@ -6,8 +6,10 @@
 
 pub mod custom;
 pub mod file;
+pub mod image_info;
 pub mod memory_tool;
 pub mod model_tool;
+pub mod pdf_read;
 pub mod shell;
 pub mod skill_tool;
 pub mod web;
@@ -66,20 +68,23 @@ impl ToolRegistry {
     ) -> Self {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
 
-        if config.shell_enabled {
-            // Merge hardcoded blocked dirs with config blocked dirs
-            let mut all_blocked_dirs: Vec<String> = crate::config::HARDCODED_BLOCKED_DIRS
+        // Merge hardcoded blocked dirs with config blocked dirs (computed once, reused below)
+        let all_blocked_dirs: Vec<String> = {
+            let mut dirs: Vec<String> = crate::config::HARDCODED_BLOCKED_DIRS
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
-            all_blocked_dirs.extend(security.blocked_dirs.iter().cloned());
+            dirs.extend(security.blocked_dirs.iter().cloned());
+            dirs
+        };
 
+        if config.shell_enabled {
             let t = shell::ShellExec::new(
                 &config.shell_permission_level,
                 &config.shell_allowed_commands,
                 &config.shell_extra_allowed,
                 &config.shell_blocked_commands,
-                all_blocked_dirs,
+                all_blocked_dirs.clone(),
                 security.trusted_dirs.clone(),
                 config.shell_timeout_secs,
             );
@@ -96,12 +101,6 @@ impl ToolRegistry {
         }
 
         if config.file_enabled {
-            let mut all_blocked_dirs: Vec<String> = crate::config::HARDCODED_BLOCKED_DIRS
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            all_blocked_dirs.extend(security.blocked_dirs.iter().cloned());
-
             let read_tool = file::FileRead::new(
                 &config.file_access_dir,
                 all_blocked_dirs.clone(),
@@ -109,7 +108,7 @@ impl ToolRegistry {
             );
             let write_tool = file::FileWrite::new(
                 &config.file_access_dir,
-                all_blocked_dirs,
+                all_blocked_dirs.clone(),
                 security.trusted_dirs.clone(),
             );
             tools.insert(read_tool.name().to_string(), Arc::new(read_tool));
@@ -142,6 +141,28 @@ impl ToolRegistry {
             let t = custom::CustomTool::new(custom_config);
             tools.insert(t.name().to_string(), Arc::new(t));
         }
+
+        // Register pdf_read tool
+        if config.pdf_read_enabled {
+            let t = pdf_read::PdfRead::new(
+                &config.file_access_dir,
+                all_blocked_dirs.clone(),
+                security.trusted_dirs.clone(),
+                config.pdf_read_max_chars,
+            );
+            tools.insert(t.name().to_string(), Arc::new(t));
+        }
+
+        // Register image_info tool
+        if config.image_info_enabled {
+            let t = image_info::ImageInfo::new(
+                &config.file_access_dir,
+                all_blocked_dirs.clone(),
+                security.trusted_dirs.clone(),
+            );
+            tools.insert(t.name().to_string(), Arc::new(t));
+        }
+
         tracing::info!(
             tools = ?tools.keys().collect::<Vec<_>>(),
             "tool registry initialised"

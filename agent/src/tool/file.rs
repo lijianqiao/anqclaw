@@ -71,6 +71,75 @@ fn check_blocked_dirs(path: &Path, blocked_dirs: &[String]) -> Result<()> {
     Ok(())
 }
 
+// ─── Binary format detection helpers ─────────────────────────────────────────
+
+/// Detect image format by magic bytes. Returns format name or None.
+fn detect_image_format(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    if bytes.starts_with(b"\x89PNG") {
+        Some("PNG")
+    } else if bytes.starts_with(b"\xFF\xD8\xFF") {
+        Some("JPEG")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("GIF")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("WebP")
+    } else if bytes.starts_with(b"BM") {
+        Some("BMP")
+    } else {
+        None
+    }
+}
+
+/// Detect known binary file formats by magic bytes. Returns format name or None.
+fn detect_binary_format(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    // ZIP / DOCX / XLSX / JAR (PK header)
+    if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
+        return Some("ZIP/Archive");
+    }
+    // Windows executable
+    if bytes.starts_with(b"MZ") {
+        return Some("EXE/DLL");
+    }
+    // SQLite
+    if bytes.starts_with(b"SQLite format 3") {
+        return Some("SQLite");
+    }
+    // Gzip
+    if bytes.starts_with(b"\x1f\x8b") {
+        return Some("Gzip");
+    }
+    // ELF (Linux executable)
+    if bytes.starts_with(b"\x7fELF") {
+        return Some("ELF");
+    }
+    // Mach-O (macOS executable)
+    if bytes.len() >= 4 {
+        let magic = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if magic == 0xFEEDFACE || magic == 0xFEEDFACF || magic == 0xCAFEBABE {
+            return Some("Mach-O");
+        }
+    }
+    // tar
+    if bytes.len() >= 262 && &bytes[257..262] == b"ustar" {
+        return Some("tar");
+    }
+    // 7z
+    if bytes.starts_with(b"7z\xBC\xAF\x27\x1C") {
+        return Some("7z");
+    }
+    // RAR
+    if bytes.starts_with(b"Rar!\x1a\x07") {
+        return Some("RAR");
+    }
+    None
+}
+
 // ─── file_read ───────────────────────────────────────────────────────────────
 
 pub struct FileRead {
@@ -88,6 +157,11 @@ impl FileRead {
         }
     }
 
+    /// Maximum file size for file_read (20MB)
+    const FILE_READ_MAX_SIZE: u64 = 20 * 1024 * 1024;
+    /// Maximum chars for lossy fallback output
+    const LOSSY_MAX_CHARS: usize = 2000;
+
     fn is_trusted(&self, path: &Path) -> bool {
         let s = path.to_string_lossy();
         self.trusted_dirs.iter().any(|d| s.starts_with(d.as_str()))
@@ -100,7 +174,6 @@ impl FileRead {
             .ok_or_else(|| anyhow::anyhow!("missing `path` parameter"))?;
 
         let path = resolve_safe_path(&self.sandbox, path_str);
-        // If resolve_safe_path fails (outside sandbox), check if it's in a trusted dir
         let path = match path {
             Ok(p) => p,
             Err(_) => {
@@ -112,18 +185,80 @@ impl FileRead {
                 if self.is_trusted(&abs) {
                     abs
                 } else {
-                    // Re-call to get the original error
                     resolve_safe_path(&self.sandbox, path_str)?
                 }
             }
         };
         check_blocked_dirs(&path, &self.blocked_dirs)?;
 
-        let content = tokio::fs::read_to_string(&path)
+        // Step 0: File size pre-check
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(|e| anyhow::anyhow!("stat `{}`: {e}", path.display()))?;
+        let file_size = metadata.len();
+        if file_size > Self::FILE_READ_MAX_SIZE {
+            return Ok(format!(
+                "[文件过大: {} bytes ({:.1} MB), 最大允许 {} MB。请使用专用工具处理。]",
+                file_size,
+                file_size as f64 / 1_048_576.0,
+                Self::FILE_READ_MAX_SIZE / 1_048_576
+            ));
+        }
+
+        // Step 1: Read raw bytes once (avoids double-read of read_to_string then read)
+        let bytes = tokio::fs::read(&path)
             .await
             .map_err(|e| anyhow::anyhow!("read `{}`: {e}", path.display()))?;
 
-        Ok(content)
+        // Step 2: Try UTF-8 conversion (zero-copy if valid)
+        match String::from_utf8(bytes) {
+            Ok(content) => return Ok(content),
+            Err(e) => {
+                // Reclaim the bytes for binary detection
+                let bytes = e.into_bytes();
+
+                // Step 3: PDF detection
+                if bytes.starts_with(b"%PDF-") {
+                    return Ok(format!(
+                        "[PDF 文件: {} bytes ({:.1} MB)。请使用 `pdf_read` 工具提取文本内容。路径: {}]",
+                        file_size,
+                        file_size as f64 / 1_048_576.0,
+                        path.display()
+                    ));
+                }
+
+                // Step 4: Image detection
+                if let Some(format) = detect_image_format(&bytes) {
+                    return Ok(format!(
+                        "[图片文件: {format}, {} bytes ({:.1} KB)。请使用 `image_info` 工具查看详情。路径: {}]",
+                        file_size,
+                        file_size as f64 / 1024.0,
+                        path.display()
+                    ));
+                }
+
+                // Step 5: Known binary format detection
+                if let Some(format) = detect_binary_format(&bytes) {
+                    return Ok(format!(
+                        "[二进制文件: {format}, {} bytes ({:.1} KB), 无法直接读取]",
+                        file_size,
+                        file_size as f64 / 1024.0
+                    ));
+                }
+
+                // Step 6: Lossy fallback with truncation
+                let lossy = String::from_utf8_lossy(&bytes);
+                if lossy.len() > Self::LOSSY_MAX_CHARS {
+                    Ok(format!(
+                        "[警告: 非纯文本文件，已截断到前 {} 字符]\n\n{}",
+                        Self::LOSSY_MAX_CHARS,
+                        &lossy[..Self::LOSSY_MAX_CHARS]
+                    ))
+                } else {
+                    Ok(lossy.into_owned())
+                }
+            }
+        }
     }
 }
 
@@ -248,6 +383,16 @@ impl Tool for FileWrite {
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(self.do_execute(args))
     }
+}
+
+/// Public wrapper for resolve_safe_path (used by pdf_read and image_info tools)
+pub fn resolve_safe_path_pub(sandbox: &Path, user_path: &str) -> Result<PathBuf> {
+    resolve_safe_path(sandbox, user_path)
+}
+
+/// Public wrapper for check_blocked_dirs (used by pdf_read and image_info tools)
+pub fn check_blocked_dirs_pub(path: &Path, blocked_dirs: &[String]) -> Result<()> {
+    check_blocked_dirs(path, blocked_dirs)
 }
 
 #[cfg(test)]
