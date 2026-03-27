@@ -1,77 +1,79 @@
 # anqclaw
 
-anqclaw 是一个用 Rust 构建的私人 AI 助理，当前支持飞书、HTTP 和 CLI 三种接入方式，具备多 LLM 协作、工具调用、持久记忆，以及面向真实任务的运行时自举能力。
+[中文版本](README_zh.md)
 
-## 当前能力
+anqclaw is a personal AI assistant built in Rust. It currently supports Feishu, HTTP, and CLI entry points, with multi-LLM collaboration, tool calling, persistent memory, and runtime bootstrapping for real-world tasks.
 
-- 多 LLM Profile：Anthropic、OpenAI-compatible、Ollama 等
-- Agentic Loop：LLM 与工具多轮协作，支持 tool calling 与流式回复
-- 多通道接入：Feishu、HTTP API、CLI
-- 内置工具：shell、web、file、memory、pdf_read、image_info、custom tool
-- SQLite 对话历史与长期记忆，长期记忆采用 source table + FTS5 索引镜像
-- Python 任务自举：支持在工作区自动准备 `.venv` 并执行脚本
-- 默认安全收敛：受控 shell、文件沙箱、SSRF 校验、审计日志
+## Current Capabilities
 
-## 架构概览
+- Multiple LLM profiles: Anthropic, OpenAI-compatible, Ollama, and more
+- Agentic loop with tool calling and streaming responses
+- Multi-channel access: Feishu, HTTP API, and CLI
+- Built-in tools: shell, web, file, memory, pdf_read, image_info, and custom tools
+- SQLite conversation history and long-term memory, with a source table plus FTS5 index mirror
+- Python task bootstrap: prepares a workspace `.venv` and runs scripts when needed
+- Default safety controls: supervised shell, file sandboxing, SSRF checks, and audit logging
 
-主链路：
+## Architecture Overview
+
+Main flow:
 
 Feishu/HTTP/CLI Channel -> Gateway -> AgentCore -> ToolRegistry/MemoryStore -> Channel
 
-核心模块：
+Core modules:
 
-- `channel`：飞书、HTTP、CLI 输入输出
-- `gateway`：路由、去重、限流、会话串行
-- `agent`：上下文拼装、环境探测、agentic loop
-- `llm`：多 Provider 抽象与客户端
-- `tool`：工具注册与执行
-- `memory`：SQLite 历史与长期记忆
-- `audit` / `metrics` / `scheduler`：审计、指标与后台任务
+- `channel`: Feishu, HTTP, and CLI input/output
+- `gateway`: routing, deduplication, rate limiting, and per-session serialization
+- `agent`: context assembly, environment probing, and the agentic loop
+- `llm`: provider abstraction and client implementations
+- `tool`: tool registration and execution
+- `memory`: SQLite-backed history and long-term memory
+- `audit` / `metrics` / `scheduler`: auditing, metrics, and background tasks
 
-## 快速开始
+## Quick Start
 
-1. 构建
+1. Build
 
 ```bash
 cd agent
 cargo build
 ```
 
-2. 首次初始化
+2. Initial setup
 
 ```bash
 cargo run -- onboard
 ```
 
-3. CLI 对话
+3. CLI chat
 
 ```bash
-cargo run -- chat "你好"
-# 或交互模式
+cargo run -- chat "hello"
+# or interactive mode
 cargo run -- chat
 ```
 
-4. 启动服务
+4. Start the service
 
 ```bash
 cargo run -- serve
 ```
 
-5. 查看或校验配置
+5. Show or validate configuration
 
 ```bash
 cargo run -- config show
 cargo run -- config validate
 ```
 
-## 质量状态
+## Quality Status
 
-- 本地已完成 `cargo test --manifest-path agent/Cargo.toml`
-- 项目已接入 CI，执行测试、clippy 和 cargo-audit
-- 最近一轮修复已覆盖 custom tool、trusted path、web SSRF、stream 中断、Feishu token 刷新、长期记忆并发写入等回归场景
+- Local validation has passed with `cargo test --manifest-path agent/Cargo.toml`
+- CI is in place for tests, clippy, and cargo-audit
+- Recent regression coverage includes custom tools, trusted path handling, web SSRF, interrupted streams, Feishu token refresh, and concurrent long-term memory writes
 
-## 文档
+## Docs
 
-- 自主能力链设计：[docs/autonomous-capability-chain-design.md](docs/autonomous-capability-chain-design.md)
-- 基础架构设计基线：[docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md](docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md)
-- 文件提取设计：[docs/superpowers/specs/2026-03-26-file-extraction-design.md](docs/superpowers/specs/2026-03-26-file-extraction-design.md)
+- Autonomous capability chain design: [docs/autonomous-capability-chain-design.md](docs/autonomous-capability-chain-design.md)
+- Baseline architecture design: [docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md](docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md)
+- File extraction design: [docs/superpowers/specs/2026-03-26-file-extraction-design.md](docs/superpowers/specs/2026-03-26-file-extraction-design.md)
