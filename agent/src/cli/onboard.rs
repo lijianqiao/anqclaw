@@ -70,6 +70,13 @@ const PRESETS: &[ProviderPreset] = &[
         needs_api_key: true,
     },
     ProviderPreset {
+        name: "OpenRouter",
+        provider: "openrouter",
+        default_model: "anthropic/claude-sonnet-4",
+        default_base_url: "https://openrouter.ai/api/v1",
+        needs_api_key: true,
+    },
+    ProviderPreset {
         name: "其他 OpenAI 兼容",
         provider: "openai_compat",
         default_model: "",

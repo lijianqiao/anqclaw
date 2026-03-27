@@ -29,6 +29,8 @@ pub struct OpenAiCompatClient {
     max_tokens: u32,
     temperature: f32,
     supports_tools: bool,
+    /// Extra headers sent with every request (e.g. OpenRouter's HTTP-Referer).
+    extra_headers: Vec<(String, String)>,
 }
 
 impl OpenAiCompatClient {
@@ -39,6 +41,7 @@ impl OpenAiCompatClient {
             .context("build reqwest client")?;
 
         let endpoint = build_endpoint(&config.base_url);
+        let extra_headers = provider_extra_headers(&config.provider);
 
         Ok(Self {
             http,
@@ -48,7 +51,23 @@ impl OpenAiCompatClient {
             max_tokens: config.max_tokens,
             temperature: config.temperature,
             supports_tools: config.supports_tools,
+            extra_headers,
         })
+    }
+
+    fn apply_request_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let mut req = req.header("Content-Type", "application/json");
+
+        let key = self.api_key.expose_secret();
+        if !key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+
+        for (name, value) in &self.extra_headers {
+            req = req.header(name.as_str(), value.as_str());
+        }
+
+        req
     }
 
     /// Performs the actual HTTP request with retry logic.
@@ -81,18 +100,7 @@ impl OpenAiCompatClient {
                 tokio::time::sleep(backoff).await;
             }
 
-            let mut req = self
-                .http
-                .post(&self.endpoint)
-                .header("Content-Type", "application/json");
-
-            // Only add Authorization header if api_key is non-empty (Ollama doesn't need it)
-            {
-                let key = self.api_key.expose_secret();
-                if !key.is_empty() {
-                    req = req.header("Authorization", format!("Bearer {key}"));
-                }
-            }
+            let req = self.apply_request_headers(self.http.post(&self.endpoint));
 
             let resp = req.json(&body).send().await;
 
@@ -121,7 +129,8 @@ impl OpenAiCompatClient {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenAI-compat request failed after retries")))
+        Err(last_err
+            .unwrap_or_else(|| anyhow::anyhow!("OpenAI-compat request failed after retries")))
     }
 
     /// Streaming version — sends SSE request, returns a channel of StreamEvents.
@@ -145,17 +154,7 @@ impl OpenAiCompatClient {
             body["tools"] = serde_json::to_value(&req_tools)?;
         }
 
-        let mut req = self
-            .http
-            .post(&self.endpoint)
-            .header("Content-Type", "application/json");
-
-        {
-            let key = self.api_key.expose_secret();
-            if !key.is_empty() {
-                req = req.header("Authorization", format!("Bearer {key}"));
-            }
-        }
+        let req = self.apply_request_headers(self.http.post(&self.endpoint));
 
         let response = req.json(&body).send().await?;
 
@@ -243,8 +242,7 @@ impl OpenAiCompatClient {
                     Some(v) => v,
                     None => continue,
                 };
-                let arguments =
-                    serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+                let arguments = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
                 tool_calls.push(ToolCall {
                     id,
                     name,
@@ -280,8 +278,23 @@ impl LlmClient for OpenAiCompatClient {
         &'a self,
         messages: &'a [ChatMessage],
         tools: &'a [ToolDefinition],
-    ) -> Pin<Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>>
+    {
         Box::pin(self.do_chat_stream(messages, tools))
+    }
+}
+
+fn provider_extra_headers(provider: &str) -> Vec<(String, String)> {
+    if provider == "openrouter" {
+        vec![
+            (
+                "HTTP-Referer".to_string(),
+                "https://github.com/anqclaw".to_string(),
+            ),
+            ("X-Title".to_string(), "anqclaw".to_string()),
+        ]
+    } else {
+        Vec::new()
     }
 }
 
@@ -632,5 +645,24 @@ mod tests {
             build_endpoint(""),
             "https://api.openai.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn test_provider_extra_headers_openrouter() {
+        assert_eq!(
+            provider_extra_headers("openrouter"),
+            vec![
+                (
+                    "HTTP-Referer".to_string(),
+                    "https://github.com/anqclaw".to_string()
+                ),
+                ("X-Title".to_string(), "anqclaw".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_provider_extra_headers_other_provider_empty() {
+        assert!(provider_extra_headers("openai").is_empty());
     }
 }
