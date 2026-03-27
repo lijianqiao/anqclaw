@@ -311,6 +311,7 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
     let tools = Arc::new(ToolRegistry::new(
         &config.tools,
         &config.security,
+        &config.agent,
         memory.clone(),
         skill_registry.clone(),
         llm_profile_names,

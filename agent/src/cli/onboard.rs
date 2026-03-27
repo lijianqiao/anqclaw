@@ -5,7 +5,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use dialoguer::{Input, Select, Confirm};
+use dialoguer::{Confirm, Input, Select};
 
 use crate::paths::{anqclaw_home, ensure_dirs};
 
@@ -58,7 +58,7 @@ const PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "Ollama (本地模型)",
         provider: "ollama",
-        default_model: "qwen2.5:14b",
+        default_model: "carstenuhlig/omnicoder-9b",
         default_base_url: "http://localhost:11434",
         needs_api_key: false,
     },
@@ -125,16 +125,15 @@ pub fn run_onboard() -> anyhow::Result<()> {
         .default(preset.default_model.to_string())
         .interact_text()?;
 
-    let base_url: String = if preset.default_base_url.is_empty() && preset.provider == "openai_compat" {
-        Input::new()
-            .with_prompt("Base URL")
-            .interact_text()?
-    } else {
-        Input::new()
-            .with_prompt("Base URL")
-            .default(preset.default_base_url.to_string())
-            .interact_text()?
-    };
+    let base_url: String =
+        if preset.default_base_url.is_empty() && preset.provider == "openai_compat" {
+            Input::new().with_prompt("Base URL").interact_text()?
+        } else {
+            Input::new()
+                .with_prompt("Base URL")
+                .default(preset.default_base_url.to_string())
+                .interact_text()?
+        };
 
     let api_key: String = if preset.needs_api_key {
         Input::new()
@@ -163,9 +162,7 @@ pub fn run_onboard() -> anyhow::Result<()> {
         .interact()?;
 
     let feishu_config = if setup_feishu {
-        let app_id: String = Input::new()
-            .with_prompt("App ID")
-            .interact_text()?;
+        let app_id: String = Input::new().with_prompt("App ID").interact_text()?;
         let app_secret: String = Input::new()
             .with_prompt("App Secret (或 ${FEISHU_APP_SECRET})")
             .interact_text()?;
@@ -229,7 +226,9 @@ fn generate_config(
 
     s.push_str("[app]\n");
     s.push_str("name = \"anqclaw\"\n");
-    s.push_str("log_level = \"info\"\n\n");
+    s.push_str("# workspace = \"workspace\"\n");
+    s.push_str("log_level = \"info\"\n");
+    s.push_str("log_file = \"logs/anqclaw.log\"  # 超级助手默认持久化运行日志\n\n");
 
     s.push_str("[llm.default]\n");
     s.push_str(&format!("provider = \"{provider}\"\n"));
@@ -255,40 +254,64 @@ fn generate_config(
     s.push_str("[tools]\n");
     s.push_str("shell_enabled = true\n");
     s.push_str("shell_permission_level = \"supervised\"\n");
+    s.push_str("shell_timeout_secs = 30\n");
+    s.push_str("file_access_dir = \"workspace\"\n");
+    s.push_str("\n");
+    s.push_str("# supervised 模式下允许执行的命令（基础白名单）\n");
+    s.push_str(
+        "shell_allowed_commands = [\"ls\", \"cat\", \"grep\", \"find\", \"date\", \"curl\"]\n",
+    );
+    s.push_str("# 额外允许的命令（追加到上面的白名单之后）\n");
+    s.push_str("# Python 运行时命令默认放开，配合 auto_install_packages 可自动自举工作区 .venv\n");
+    s.push_str("shell_extra_allowed = [\"python\", \"python3\", \"pip\", \"pip3\", \"uv\"]\n");
+    s.push_str("# 即使在 full 模式也始终禁止的命令\n");
+    s.push_str("shell_blocked_commands = [\"rm -rf /\", \"mkfs\", \"dd\", \"format\", \"shutdown\", \"reboot\"]\n");
+    s.push_str("\n");
     s.push_str("web_fetch_enabled = true\n");
+    s.push_str("# web_fetch_timeout_secs = 10\n");
+    s.push_str("# web_fetch_max_bytes = 102400\n");
     s.push_str("file_enabled = true\n");
     s.push_str("memory_tool_enabled = true\n\n");
 
     s.push_str("[security]\n");
     s.push_str("auto_redact_secrets = true\n");
-    s.push_str("# trusted_dirs = [\"~/projects\"]\n");
-    s.push_str("# blocked_dirs = []  # System dirs are always blocked\n\n");
+    s.push_str("# trusted_dirs = [\"~/projects\"]  # 信任目录享受 full 权限\n");
+    s.push_str("# blocked_dirs = []  # 系统目录始终被阻止（硬编码）\n");
+    s.push_str("# redact_patterns = []  # 额外脱敏字符串\n\n");
 
     s.push_str("[limits]\n");
     s.push_str("max_requests_per_minute = 20\n");
-    s.push_str("max_message_length = 10000\n\n");
+    s.push_str("max_message_length = 10000\n");
+    s.push_str("# max_tokens_per_conversation = 50000\n\n");
 
     s.push_str("[memory]\n");
+    s.push_str("# db_path = \"data/memory.db\"\n");
     s.push_str("history_limit = 20\n");
     s.push_str("search_limit = 5\n");
-    s.push_str("# session_key_strategy = \"chat\"  # Options: chat, user, chat_user\n\n");
+    s.push_str("# session_key_strategy = \"chat\"  # 可选: chat, user, chat_user\n\n");
 
     s.push_str("[agent]\n");
     s.push_str("max_tool_rounds = 10\n");
+    s.push_str("max_consecutive_tool_errors = 3\n");
     s.push_str("llm_profile = \"default\"\n");
-    s.push_str("# fallback_profile = \"deepseek\"  # Fallback LLM when primary fails\n\n");
+    s.push_str("# fallback_profile = \"deepseek\"  # 主模型失败时的备选\n");
+    s.push_str("# system_prompt_file = \"\"  # 自定义 system prompt 文件路径\n");
+    s.push_str("auto_install_packages = true  # 允许 LLM 自动安装依赖包\n");
+    s.push_str("install_scope = \"venv\"  # 安装隔离: venv | user | system\n");
+    s.push_str("venv_path = \"workspace/.venv\"\n");
+    s.push_str("managed_python_version = \"3.12\"\n\n");
 
     s.push_str("[heartbeat]\n");
     s.push_str("enabled = false\n");
     s.push_str("interval_minutes = 30\n\n");
 
     s.push_str("[audit]\n");
-    s.push_str("enabled = false\n");
+    s.push_str("enabled = true  # 默认开启，便于定位工具链和自举问题\n");
     s.push_str("log_file = \"logs/audit.jsonl\"\n");
     s.push_str("log_tool_calls = true\n");
     s.push_str("log_shell_commands = true\n");
     s.push_str("log_file_writes = true\n");
-    s.push_str("log_llm_calls = false\n\n");
+    s.push_str("log_llm_calls = true\n\n");
 
     s.push_str("[skills]\n");
     s.push_str("enabled = true\n");
@@ -354,6 +377,8 @@ const TMPL_AGENTS: &str = r#"# Agent 行为指令
 - 保持回复简洁有用
 - 支持多轮对话，记住上下文
 - 使用工具时遵守安全约束
+- 当任务更适合脚本处理时，优先让 LLM 决策使用 shell_exec + 文件工具完成
+- 如果任务需要 Python，优先在工作区内完成自举、写脚本、执行、返回结果
 
 ## 决策流程
 
@@ -373,6 +398,13 @@ const TMPL_TOOLS: &str = r#"# 工具使用指南
 - `file_write` — 写入文件
 - `memory_save` — 保存长期记忆
 - `memory_search` — 搜索长期记忆
+
+## 超级助手工作方式
+
+- 遇到 xlsx/csv/docx、批量数据处理、格式转换、复杂统计时，优先考虑写 Python 脚本并通过 `shell_exec` 执行
+- 如果本机缺少 uv / Python，且配置允许自动安装，优先让 `shell_exec` 在工作区自举 `.venv`
+- Python 脚本优先写入工作区的 `script/` 目录；临时输出和分析结果写入工作区其它合适位置，避免污染系统目录
+- 优先使用 `python script.py`、`uv pip install <pkg>` 这类命令，不要依赖手动激活虚拟环境
 
 ## 安全红线
 
@@ -401,7 +433,8 @@ const TMPL_USER: &str = r#"# 用户画像
 - 回复风格：简洁直接
 "#;
 
-const TMPL_MEMORY: &str = "# 预置记忆\n\n<!-- 在此填写启动时加载的重要事实，每次构建 system prompt 时会读取 -->\n";
+const TMPL_MEMORY: &str =
+    "# 预置记忆\n\n<!-- 在此填写启动时加载的重要事实，每次构建 system prompt 时会读取 -->\n";
 
 const TMPL_HEARTBEAT: &str = "# Heartbeat\n\n<!-- 定时任务 prompt：每次 heartbeat tick 时读取此文件 -->\n<!-- 如果 LLM 回复包含 \"HEARTBEAT_OK\" 则不通知用户 -->\n<!-- 留空或删除此文件则跳过 heartbeat -->\n";
 

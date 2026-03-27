@@ -40,6 +40,20 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     config.memory.db_path = resolve_path(&home, &config.memory.db_path)
         .to_string_lossy()
         .into_owned();
+    config.tools.file_access_dir = resolve_path(&home, &config.tools.file_access_dir)
+        .to_string_lossy()
+        .into_owned();
+    config.agent.venv_path = resolve_path(&home, &config.agent.venv_path)
+        .to_string_lossy()
+        .into_owned();
+    if !config.app.log_file.is_empty() {
+        config.app.log_file = resolve_path(&home, &config.app.log_file)
+            .to_string_lossy()
+            .into_owned();
+    }
+    config.audit.log_file = resolve_path(&home, &config.audit.log_file)
+        .to_string_lossy()
+        .into_owned();
 
     println!("\x1b[1m[app]\x1b[0m");
     println!("  name       = {}", config.app.name);
@@ -115,6 +129,16 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     println!("  max_message_length         = {}", config.limits.max_message_length);
     println!();
 
+    println!("\x1b[1m[tools]\x1b[0m");
+    println!("  shell_enabled         = {}", config.tools.shell_enabled);
+    println!("  shell_permission      = {}", config.tools.shell_permission_level);
+    println!("  shell_timeout_secs    = {}", config.tools.shell_timeout_secs);
+    println!("  file_access_dir       = {}", config.tools.file_access_dir);
+    if !config.tools.shell_extra_allowed.is_empty() {
+        println!("  shell_extra_allowed   = {:?}", config.tools.shell_extra_allowed);
+    }
+    println!();
+
     println!("\x1b[1m[memory]\x1b[0m");
     println!("  db_path       = {}", config.memory.db_path);
     println!("  history_limit = {}", config.memory.history_limit);
@@ -125,6 +149,10 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     println!("  max_tool_rounds    = {}", config.agent.max_tool_rounds);
     println!("  llm_profile        = {}", config.agent.llm_profile);
     println!("  fallback_profile   = {}", if config.agent.fallback_profile.is_empty() { "(none)" } else { &config.agent.fallback_profile });
+    println!("  auto_install_packages = {}", config.agent.auto_install_packages);
+    println!("  install_scope        = {}", config.agent.install_scope);
+    println!("  venv_path            = {}", config.agent.venv_path);
+    println!("  managed_python_version = {}", config.agent.managed_python_version);
     println!();
 
     println!("\x1b[1m[heartbeat]\x1b[0m");
@@ -137,9 +165,11 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
 
     println!("\x1b[1m[audit]\x1b[0m");
     println!("  enabled  = {}", config.audit.enabled);
-    if config.audit.enabled {
-        println!("  log_file = {}", config.audit.log_file);
-    }
+    println!("  log_file = {}", config.audit.log_file);
+    println!("  log_tool_calls = {}", config.audit.log_tool_calls);
+    println!("  log_shell_commands = {}", config.audit.log_shell_commands);
+    println!("  log_file_writes = {}", config.audit.log_file_writes);
+    println!("  log_llm_calls = {}", config.audit.log_llm_calls);
 
     Ok(())
 }
@@ -206,6 +236,38 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
                 } else {
                     println!("⚠ Data directory missing: {} (will be created on first run)", parent.display());
                 }
+            }
+
+            // 7. Check managed runtime configuration
+            if config.tools.shell_enabled && config.agent.auto_install_packages && config.agent.install_scope == "venv" {
+                let venv = resolve_path(&home, &config.agent.venv_path);
+                println!(
+                    "✓ Managed Python bootstrap enabled: {} (target Python {})",
+                    venv.display(),
+                    config.agent.managed_python_version
+                );
+                if venv.exists() {
+                    println!("✓ Managed venv already exists: {}", venv.display());
+                } else {
+                    println!("ℹ Managed venv not created yet: {} (will bootstrap on first Python task)", venv.display());
+                }
+            } else {
+                println!("ℹ Managed Python bootstrap is disabled");
+            }
+
+            // 8. Check application log file path
+            if !config.app.log_file.is_empty() {
+                let log_path = resolve_path(&home, &config.app.log_file);
+                if let Some(parent) = log_path.parent() {
+                    if parent.exists() {
+                        println!("✓ App log directory exists: {}", parent.display());
+                    } else {
+                        println!("⚠ App log directory missing: {} (will be created on first run)", parent.display());
+                    }
+                }
+                println!("✓ App log file configured: {}", log_path.display());
+            } else {
+                println!("⚠ App log file is empty — bootstrap and script logs will only appear on stderr");
             }
 
             println!();

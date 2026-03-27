@@ -110,6 +110,7 @@ async fn test_pure_text_reply() {
     let tools = Arc::new(ToolRegistry::new(
         &config.tools,
         &config.security,
+        &config.agent,
         memory.clone(),
         None,
         vec![],
@@ -157,6 +158,7 @@ async fn test_tool_call_and_reply() {
     let tools = Arc::new(ToolRegistry::new(
         &config.tools,
         &config.security,
+        &config.agent,
         memory.clone(),
         None,
         vec![],
@@ -197,6 +199,7 @@ async fn test_history_persistence() {
     let tools = Arc::new(ToolRegistry::new(
         &config.tools,
         &config.security,
+        &config.agent,
         memory.clone(),
         None,
         vec![],
@@ -210,7 +213,8 @@ async fn test_history_persistence() {
         config.clone(),
         None,
         None,
-    ).await;
+    )
+    .await;
 
     // First message
     let msg1 = test_inbound("Hello");
@@ -275,6 +279,7 @@ async fn test_multi_tool_calls() {
     let tools = Arc::new(ToolRegistry::new(
         &config.tools,
         &config.security,
+        &config.agent,
         memory.clone(),
         None,
         vec![],
@@ -326,6 +331,7 @@ max_tool_rounds = 2
     let tools = Arc::new(ToolRegistry::new(
         &config.tools,
         &config.security,
+        &config.agent,
         memory.clone(),
         None,
         vec![],

@@ -163,7 +163,10 @@ fn default_install_scope() -> String {
     "venv".to_string()
 }
 fn default_venv_path() -> String {
-    ".anqclaw/envs".to_string()
+    "workspace/.venv".to_string()
+}
+fn default_managed_python_version() -> String {
+    "3.12".to_string()
 }
 fn default_max_consecutive_tool_errors() -> u32 {
     3
@@ -669,9 +672,12 @@ pub struct AgentSection {
     /// Install isolation: "venv" | "user" | "system". Default: "venv".
     #[serde(default = "default_install_scope")]
     pub install_scope: String,
-    /// Virtual environment path (relative to workspace). Default: ".anqclaw/envs".
+    /// Virtual environment path (relative to ~/.anqclaw/). Default: "workspace/.venv".
     #[serde(default = "default_venv_path")]
     pub venv_path: String,
+    /// Managed Python version used when bootstrapping an isolated runtime.
+    #[serde(default = "default_managed_python_version")]
+    pub managed_python_version: String,
     /// Max consecutive all-failed tool rounds before forcing stop. Default: 3.
     #[serde(default = "default_max_consecutive_tool_errors")]
     pub max_consecutive_tool_errors: u32,
@@ -690,6 +696,7 @@ impl Default for AgentSection {
             auto_install_packages: false,
             install_scope: default_install_scope(),
             venv_path: default_venv_path(),
+            managed_python_version: default_managed_python_version(),
             max_consecutive_tool_errors: default_max_consecutive_tool_errors(),
             probe_extra_binaries: Vec::new(),
         }

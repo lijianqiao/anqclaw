@@ -1,6 +1,6 @@
 [package]
 name = "anqclaw"
-version = "0.3.4"
+version = "0.4.3"
 edition = "2024"
 
 [dependencies]
@@ -34,6 +34,7 @@ tokio-stream = "0.1"
 base64 = "0.22"
 notify = "7"
 pdf-extract = { version = "0.7", optional = true }
+encoding_rs = "0.8"
 
 [features]
 default = []

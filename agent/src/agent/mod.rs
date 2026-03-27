@@ -606,6 +606,7 @@ max_tool_rounds = 3
         let tools = Arc::new(ToolRegistry::new(
             &config.tools,
             &config.security,
+            &config.agent,
             memory.clone(),
             None,
             vec![],
@@ -646,6 +647,7 @@ max_tool_rounds = 3
         let tools = Arc::new(ToolRegistry::new(
             &config.tools,
             &config.security,
+            &config.agent,
             memory.clone(),
             None,
             vec![],
@@ -678,6 +680,7 @@ max_tool_rounds = 3
         let tools = Arc::new(ToolRegistry::new(
             &config.tools,
             &config.security,
+            &config.agent,
             memory.clone(),
             None,
             vec![],
@@ -711,6 +714,7 @@ max_tool_rounds = 3
         let tools = Arc::new(ToolRegistry::new(
             &config.tools,
             &config.security,
+            &config.agent,
             memory.clone(),
             None,
             vec![],
@@ -762,6 +766,7 @@ max_tool_rounds = 3
         let tools = Arc::new(ToolRegistry::new(
             &config.tools,
             &config.security,
+            &config.agent,
             memory.clone(),
             None,
             vec![],

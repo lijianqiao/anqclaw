@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "anqclaw"
-version = "0.3.4"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -54,6 +54,7 @@ dependencies = [
  "dashmap",
  "dialoguer",
  "dirs",
+ "encoding_rs",
  "futures",
  "futures-util",
  "lru",

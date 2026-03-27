@@ -45,6 +45,16 @@ pub struct AuditLogger {
 }
 
 impl AuditLogger {
+    fn preview_text(text: &str, max_chars: usize) -> String {
+        let mut chars = text.chars();
+        let preview: String = chars.by_ref().take(max_chars).collect();
+        if chars.next().is_some() {
+            format!("{preview}...[truncated]")
+        } else {
+            preview
+        }
+    }
+
     /// Create a new audit logger that writes to the given file path.
     /// Creates parent directories if needed.
     pub fn new(log_file: &str) -> anyhow::Result<Self> {
@@ -74,11 +84,7 @@ impl AuditLogger {
         is_error: bool,
         duration_ms: u64,
     ) {
-        let preview = if result.len() > 500 {
-            format!("{}...[truncated]", &result[..500])
-        } else {
-            result.to_string()
-        };
+        let preview = Self::preview_text(result, 500);
 
         let event = AuditEvent::ToolCall {
             timestamp: Utc::now().to_rfc3339(),
@@ -140,5 +146,19 @@ impl AuditLogger {
         if let Err(e) = writer.flush() {
             tracing::warn!(error = %e, "audit: failed to flush writer");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AuditLogger;
+
+    #[test]
+    fn test_preview_text_preserves_char_boundaries() {
+        let text = "设备数据导出.xlsx设备数据导出.xlsx设备数据导出.xlsx";
+        let preview = AuditLogger::preview_text(text, 10);
+        assert_eq!(preview.chars().take(10).count(), 10);
+        assert!(!preview.contains(''));
+        assert!(preview.ends_with("...[truncated]"));
     }
 }

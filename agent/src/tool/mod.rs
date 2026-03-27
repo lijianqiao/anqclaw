@@ -62,6 +62,7 @@ impl ToolRegistry {
     pub fn new(
         config: &ToolsSection,
         security: &SecuritySection,
+        agent: &crate::config::AgentSection,
         memory_store: Arc<MemoryStore>,
         skill_registry: Option<Arc<SkillRegistry>>,
         llm_profile_names: Vec<String>,
@@ -80,6 +81,11 @@ impl ToolRegistry {
         };
 
         if config.shell_enabled {
+            let venv_path = if agent.auto_install_packages && agent.install_scope == "venv" {
+                Some(agent.venv_path.clone())
+            } else {
+                None
+            };
             let t = shell::ShellExec::new(
                 &config.shell_permission_level,
                 &config.shell_allowed_commands,
@@ -88,6 +94,9 @@ impl ToolRegistry {
                 all_blocked_dirs.clone(),
                 security.trusted_dirs.clone(),
                 config.shell_timeout_secs,
+                Some(config.file_access_dir.clone()),
+                venv_path,
+                Some(agent.managed_python_version.clone()),
             );
             tools.insert(t.name().to_string(), Arc::new(t));
         }
@@ -178,7 +187,10 @@ impl ToolRegistry {
             })
             .collect();
 
-        Self { tools, definitions_cache }
+        Self {
+            tools,
+            definitions_cache,
+        }
     }
 
     /// Returns tool definitions for all registered tools (sent to the LLM).

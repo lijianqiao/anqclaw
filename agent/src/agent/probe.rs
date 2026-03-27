@@ -128,12 +128,20 @@ impl EnvironmentProbe {
         let has_python = self.has("python3") || self.has("python");
         let has_pip = self.has("pip3") || self.has("pip");
         let has_uv = self.has("uv");
+        let managed_bootstrap =
+            agent_config.auto_install_packages && agent_config.install_scope == "venv";
 
         if has_python && has_pip {
             s += "- Python is available with pip. You can install packages and run scripts.\n";
             s += "- For data processing (xlsx, csv, docx), write Python scripts and execute via shell_exec.\n";
+            s += "- Store generated scripts under `script/` in the workspace root, not under `workspace/`.\n";
             s +=
                 "- If a package is missing, install it first (prefer uv if available, else pip).\n";
+        } else if managed_bootstrap {
+            s += "- A managed Python runtime can be bootstrapped automatically for shell_exec tasks.\n";
+            s += "- For data processing (xlsx, csv, docx), write Python scripts and execute via shell_exec.\n";
+            s += "- Store generated scripts under `script/` in the workspace root, not under `workspace/`.\n";
+            s += "- If Python, pip, or uv is missing, shell_exec may prepare the isolated runtime automatically.\n";
         } else if has_python && !has_pip {
             s += "- Python is available but pip is NOT. You can run scripts with stdlib only.\n";
             s += "- If packages are needed, inform the user to install pip first.\n";
@@ -145,6 +153,8 @@ impl EnvironmentProbe {
         if has_uv {
             s += "- uv is available. Prefer `uv pip install` over `pip install` for speed.\n";
             s += "- Use `uv venv` for isolated environments when installing packages.\n";
+        } else if managed_bootstrap {
+            s += "- uv is not currently available, but the managed runtime bootstrapper may install it automatically.\n";
         }
 
         // Package installation policy
@@ -154,19 +164,22 @@ impl EnvironmentProbe {
             if agent_config.install_scope == "venv" {
                 let venv = &agent_config.venv_path;
                 s += &format!("- ALWAYS use a virtual environment at `{venv}`.\n");
+                s += "- shell_exec will prepare the environment automatically before Python-oriented commands when possible.\n";
                 s += &format!(
-                    "- Create it if it doesn't exist: `python3 -m venv {venv}` or `uv venv {venv}`.\n"
+                    "- Managed Python target version: `{}`.\n",
+                    agent_config.managed_python_version
                 );
                 #[cfg(target_os = "windows")]
                 {
                     s += &format!(
-                        "- Activate before installing: `{venv}\\Scripts\\activate && pip install <pkg>`.\n"
+                        "- Prefer commands like `python script.py` or `uv pip install <pkg>`; activation is not required because the command will be rewritten to `{venv}` automatically.\n"
                     );
+                    s += "- shell_exec runs from the workspace root on Windows, so relative paths like `script/task.py` and `设备数据导出.xlsx` should be workspace-relative.\n";
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
                     s += &format!(
-                        "- Activate before installing: `source {venv}/bin/activate && pip install <pkg>`.\n"
+                        "- Prefer commands like `python script.py` or `uv pip install <pkg>`; activation is not required because the command will be rewritten to `{venv}` automatically.\n"
                     );
                 }
             }
@@ -330,12 +343,14 @@ mod tests {
         let mut config = default_agent_section();
         config.auto_install_packages = true;
         config.install_scope = "venv".to_string();
-        config.venv_path = ".anqclaw/envs".to_string();
+        config.venv_path = "workspace/.venv".to_string();
+        config.managed_python_version = "3.12".to_string();
 
         let section = probe.to_prompt_section(&config);
         assert!(section.contains("You ARE allowed to install"));
         assert!(section.contains("virtual environment"));
-        assert!(section.contains(".anqclaw/envs"));
+        assert!(section.contains(".venv"));
+        assert!(section.contains("Managed Python target version"));
     }
 
     #[test]
@@ -361,6 +376,21 @@ mod tests {
         let section = probe.to_prompt_section(&default_agent_section());
         assert!(section.contains("uv is available"));
         assert!(section.contains("Prefer `uv pip install`"));
+    }
+
+    #[test]
+    fn test_to_prompt_section_bootstraps_when_python_missing() {
+        let probe = make_probe(&[
+            ("python3", false, None),
+            ("python", false, None),
+            ("uv", false, None),
+        ]);
+        let mut config = default_agent_section();
+        config.auto_install_packages = true;
+        config.install_scope = "venv".to_string();
+        let section = probe.to_prompt_section(&config);
+        assert!(section.contains("bootstrapped automatically"));
+        assert!(section.contains("shell_exec may prepare the isolated runtime automatically"));
     }
 
     #[test]

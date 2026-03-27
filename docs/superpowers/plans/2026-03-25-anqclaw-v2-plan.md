@@ -78,7 +78,7 @@ base_url = "https://api.deepseek.com"
 
 [llm.ollama]
 provider = "openai_compat"
-model = "qwen2.5:14b"
+model = "carstenuhlig/omnicoder-9b"
 base_url = "http://localhost:11434"
 
 [agent]

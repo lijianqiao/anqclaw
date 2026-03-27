@@ -77,6 +77,40 @@ fn resolve_safe_path(sandbox: &Path, user_path: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+fn is_script_like_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "py" | "ps1" | "js" | "ts" | "mjs" | "cjs" | "sh" | "bat" | "cmd" | "rb"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn normalize_tool_path(user_path: &str) -> String {
+    let trimmed = user_path.trim();
+    if Path::new(trimmed).is_absolute() {
+        return trimmed.to_string();
+    }
+
+    let normalized = trimmed.replace('\\', "/");
+    if let Some(rest) = normalized.strip_prefix("workspace/") {
+        let rest = rest.trim_start_matches('/');
+        if rest.starts_with("script/") {
+            return rest.to_string();
+        }
+        if is_script_like_path(rest) {
+            return format!("script/{rest}");
+        }
+        return rest.to_string();
+    }
+
+    normalized
+}
+
 // ─── Blocked directory check ─────────────────────────────────────────────────
 
 fn check_blocked_dirs(path: &Path, blocked_dirs: &[String]) -> Result<()> {
@@ -195,19 +229,21 @@ impl FileRead {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing `path` parameter"))?;
 
-        let path = resolve_safe_path(&self.sandbox, path_str);
+        let normalized_path = normalize_tool_path(path_str);
+
+        let path = resolve_safe_path(&self.sandbox, &normalized_path);
         let path = match path {
             Ok(p) => p,
             Err(_) => {
-                let abs = if Path::new(path_str).is_absolute() {
-                    PathBuf::from(path_str)
+                let abs = if Path::new(&normalized_path).is_absolute() {
+                    PathBuf::from(&normalized_path)
                 } else {
-                    self.sandbox.join(path_str)
+                    self.sandbox.join(&normalized_path)
                 };
                 if self.is_trusted(&abs) {
                     abs
                 } else {
-                    resolve_safe_path(&self.sandbox, path_str)?
+                    resolve_safe_path(&self.sandbox, &normalized_path)?
                 }
             }
         };
@@ -290,7 +326,7 @@ impl Tool for FileRead {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file. The path must be inside the workspace directory."
+        "Read the contents of a file. The path must be inside the workspace directory. Use paths relative to the workspace root; generated scripts should usually live under script/."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -342,24 +378,26 @@ impl FileWrite {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing `path` parameter"))?;
 
+        let normalized_path = normalize_tool_path(path_str);
+
         let content = args
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing `content` parameter"))?;
 
-        let path = resolve_safe_path(&self.sandbox, path_str);
+        let path = resolve_safe_path(&self.sandbox, &normalized_path);
         let path = match path {
             Ok(p) => p,
             Err(_) => {
-                let abs = if Path::new(path_str).is_absolute() {
-                    PathBuf::from(path_str)
+                let abs = if Path::new(&normalized_path).is_absolute() {
+                    PathBuf::from(&normalized_path)
                 } else {
-                    self.sandbox.join(path_str)
+                    self.sandbox.join(&normalized_path)
                 };
                 if self.is_trusted(&abs) {
                     abs
                 } else {
-                    resolve_safe_path(&self.sandbox, path_str)?
+                    resolve_safe_path(&self.sandbox, &normalized_path)?
                 }
             }
         };
@@ -379,7 +417,7 @@ impl Tool for FileWrite {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file. The path must be inside the workspace directory. Parent directories are created automatically."
+        "Write content to a file. The path must be inside the workspace directory. Use paths relative to the workspace root; generated scripts should usually live under script/. Parent directories are created automatically."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -490,5 +528,24 @@ mod tests {
         let args = serde_json::json!({});
         let result = reader.do_execute(args).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_file_write_workspace_script_prefix_maps_to_script_dir() {
+        let dir = std::env::temp_dir().join("anqclaw_test_file_script_dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let writer = FileWrite::new(dir.to_str().unwrap(), vec![], vec![]);
+        let args = serde_json::json!({
+            "path": "workspace/stats_devices.py",
+            "content": "print('ok')"
+        });
+        writer.do_execute(args).await.unwrap();
+
+        assert!(dir.join("script").join("stats_devices.py").exists());
+        assert!(!dir.join("workspace").join("stats_devices.py").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
