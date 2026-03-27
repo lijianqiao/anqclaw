@@ -24,7 +24,7 @@ pub struct OpenAiCompatClient {
     http: reqwest::Client,
     /// Full URL to the chat completions endpoint (computed once at construction).
     endpoint: String,
-    api_key: String,
+    api_key: secrecy::SecretString,
     model: String,
     max_tokens: u32,
     temperature: f32,
@@ -43,7 +43,7 @@ impl OpenAiCompatClient {
         Ok(Self {
             http,
             endpoint,
-            api_key: config.api_key.expose_secret().to_string(),
+            api_key: config.api_key.clone(),
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             temperature: config.temperature,
@@ -87,8 +87,11 @@ impl OpenAiCompatClient {
                 .header("Content-Type", "application/json");
 
             // Only add Authorization header if api_key is non-empty (Ollama doesn't need it)
-            if !self.api_key.is_empty() {
-                req = req.header("Authorization", format!("Bearer {}", self.api_key));
+            {
+                let key = self.api_key.expose_secret();
+                if !key.is_empty() {
+                    req = req.header("Authorization", format!("Bearer {key}"));
+                }
             }
 
             let resp = req.json(&body).send().await;
@@ -147,8 +150,11 @@ impl OpenAiCompatClient {
             .post(&self.endpoint)
             .header("Content-Type", "application/json");
 
-        if !self.api_key.is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", self.api_key));
+        {
+            let key = self.api_key.expose_secret();
+            if !key.is_empty() {
+                req = req.header("Authorization", format!("Bearer {key}"));
+            }
         }
 
         let response = req.json(&body).send().await?;

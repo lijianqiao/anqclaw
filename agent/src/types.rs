@@ -205,7 +205,9 @@ impl ChatMessage {
     }
 
     /// Creates a User role message with image attachments.
-    pub fn user_with_images(content: &str, images: Vec<ImageData>) -> Self {
+    /// Accepts a slice to avoid forcing callers to clone; only clones internally
+    /// when images are present.
+    pub fn user_with_images(content: &str, images: &[ImageData]) -> Self {
         Self {
             role: Role::User,
             content: content.to_string(),
@@ -214,7 +216,7 @@ impl ChatMessage {
             images: if images.is_empty() {
                 None
             } else {
-                Some(images)
+                Some(images.to_vec())
             },
         }
     }

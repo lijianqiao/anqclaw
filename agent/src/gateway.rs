@@ -100,6 +100,19 @@ impl Gateway {
             }
         });
 
+        // Periodic GC for chat_locks and rate_limiter (every 60s instead of per-message)
+        let gw_gc = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                // Remove chat locks with no active holders
+                gw_gc.chat_locks.retain(|_, v| Arc::strong_count(v) > 1);
+                // Remove empty rate limiter entries (stale sessions)
+                gw_gc.rate_limiter.retain(|_, timestamps| !timestamps.is_empty());
+            }
+        });
+
         // Drop our copy so rx closes when all channel senders are gone
         drop(tx);
 
@@ -268,8 +281,6 @@ impl Gateway {
             tracing::warn!(channel = %msg.channel, "no matching channel for reply");
         }
 
-        // 5. GC chat_locks: remove entries with no other holders
         drop(_guard);
-        self.chat_locks.retain(|_, v| Arc::strong_count(v) > 1);
     }
 }

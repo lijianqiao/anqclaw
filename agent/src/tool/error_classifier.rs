@@ -139,10 +139,17 @@ pub fn classify_error(
     if output.contains("ConnectionRefusedError")
         || output.contains("ECONNREFUSED")
         || output.contains("Could not resolve host")
+        || output.contains("Failed to fetch")
+        || output.contains("tls handshake")
+        || output.contains("certificate verify failed")
+        || output.contains("Temporary failure in name resolution")
     {
         return ErrorClassification {
             kind: ToolErrorKind::NetworkError,
-            hint: Some("Check network connectivity.".into()),
+            hint: Some(
+                "Check network connectivity, proxy/TLS settings, or install the dependency manually before retrying."
+                    .into(),
+            ),
         };
     }
 
@@ -424,6 +431,14 @@ mod tests {
         let c = classify_error("shell_exec", output, Some(1), &empty_probe());
         assert_eq!(c.kind, ToolErrorKind::NetworkError);
         assert!(c.hint.as_ref().unwrap().contains("network"));
+    }
+
+    #[test]
+    fn test_classify_uv_tls_fetch_failure_as_network_error() {
+        let output = "error: Request failed after 3 retries\n  Caused by: Failed to fetch: `https://pypi.org/simple/pandas/`\n  Caused by: client error (Connect)\n  Caused by: tls handshake eof\n[exit code: 2]";
+        let c = classify_error("shell_exec", output, Some(2), &empty_probe());
+        assert_eq!(c.kind, ToolErrorKind::NetworkError);
+        assert!(c.hint.as_ref().unwrap().contains("TLS"));
     }
 
     #[test]

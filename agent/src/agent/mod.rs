@@ -19,7 +19,7 @@ use crate::memory::MemoryStore;
 use crate::skill::SkillRegistry;
 use crate::token;
 use crate::tool::ToolRegistry;
-use crate::types::{ChatMessage, ImageData, InboundMessage, OutboundMessage, StreamEvent};
+use crate::types::{ChatMessage, InboundMessage, OutboundMessage, StreamEvent};
 
 use context::{build_system_prompt, format_memories};
 use probe::EnvironmentProbe;
@@ -40,6 +40,50 @@ pub struct AgentCore {
 }
 
 impl AgentCore {
+    fn summarize_tool_failures(results: &[crate::types::ToolResult], max_items: usize) -> String {
+        let failures: Vec<String> = results
+            .iter()
+            .filter(|result| {
+                result.is_error
+                    || (result.output.contains("[exit code:")
+                        && !result.output.contains("[exit code: 0]"))
+            })
+            .filter_map(|result| {
+                let mut lines = result.output.lines().filter(|line| !line.trim().is_empty());
+                let headline = lines.find(|line| {
+                    !line.starts_with("[exit code:")
+                        && !line.starts_with("[stdout]")
+                        && !line.starts_with("[stderr]")
+                })?;
+
+                let cleaned = headline.trim().replace('\r', " ");
+                Some(if cleaned.chars().count() > 160 {
+                    let truncated: String = cleaned.chars().take(160).collect();
+                    format!("{truncated}...")
+                } else {
+                    cleaned
+                })
+            })
+            .take(max_items)
+            .collect();
+
+        if failures.is_empty() {
+            return "多轮工具执行失败，已停止自动重试。请检查日志或手动重试。".to_string();
+        }
+
+        let bullets = failures
+            .iter()
+            .enumerate()
+            .map(|(index, failure)| format!("{}. {}", index + 1, failure))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+            "多轮工具执行失败，已停止自动重试。最近的失败如下：\n{}\n请根据错误信息调整网络、依赖或命令后再试。",
+            bullets
+        )
+    }
+
     pub async fn new(
         llm: Arc<dyn LlmClient>,
         fallback_llm: Option<Arc<dyn LlmClient>>,
@@ -116,7 +160,8 @@ impl AgentCore {
             .as_ref()
             .map(|r| r.build_summary())
             .unwrap_or_default();
-        let system_prompt = build_system_prompt(&self.config, &skill_summary, &self.env_probe).await;
+        let system_prompt =
+            build_system_prompt(&self.config, &skill_summary, &self.env_probe).await;
 
         // 2. Search relevant memories
         let user_text = msg.content.to_text();
@@ -141,9 +186,8 @@ impl AgentCore {
         // History (from SQLite)
         messages.extend_from_slice(history);
 
-        // Current user message (with image data if available)
-        let image_data: Vec<ImageData> = msg.images.clone();
-        let user_msg = ChatMessage::user_with_images(&user_text, image_data);
+        // Current user message (with image data if available — borrow, not clone)
+        let user_msg = ChatMessage::user_with_images(&user_text, &msg.images);
         messages.push(user_msg);
 
         // Token budget: trim history if it exceeds max_tokens_per_conversation
@@ -406,25 +450,36 @@ impl AgentCore {
 
                 // Consecutive error protection: if majority of tools failed this round,
                 // increment counter
-                let failed_count = results.iter().filter(|r| {
-                    r.is_error
-                        || (r.output.contains("[exit code:")
-                            && !r.output.contains("[exit code: 0]"))
-                }).count();
+                let failed_count = results
+                    .iter()
+                    .filter(|r| {
+                        r.is_error
+                            || (r.output.contains("[exit code:")
+                                && !r.output.contains("[exit code: 0]"))
+                    })
+                    .count();
                 if failed_count * 2 > results.len() {
                     consecutive_errors += 1;
                     if consecutive_errors >= max_consecutive {
-                        let stop_hint = format!(
-                            "[system: {} consecutive rounds of tool failures detected. \
-                             Stop retrying the same approach and summarize the problem to the user. \
-                             Suggest manual steps they can take to resolve it.]",
-                            consecutive_errors
-                        );
-                        messages.push(ChatMessage::user(&stop_hint));
+                        let failure_summary = Self::summarize_tool_failures(&results, 3);
+                        messages.push(ChatMessage::assistant(&failure_summary));
                         tracing::warn!(
                             consecutive_errors,
                             "consecutive error protection triggered"
                         );
+
+                        let reply = OutboundMessage {
+                            channel: msg.channel.clone(),
+                            chat_id: msg.chat_id.clone(),
+                            reply_to: if msg.message_id.is_empty() {
+                                None
+                            } else {
+                                Some(msg.message_id.clone())
+                            },
+                            content: failure_summary,
+                        };
+                        let persist_messages = messages[persist_start..].to_vec();
+                        return Ok((reply, persist_messages));
                     }
                 } else {
                     consecutive_errors = 0;
@@ -580,7 +635,9 @@ mod tests {
             &'a self,
             _messages: &'a [ChatMessage],
             _tools: &'a [ToolDefinition],
-        ) -> Pin<Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>> {
+        ) -> Pin<
+            Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>,
+        > {
             Box::pin(async move {
                 if let Some(events) = &self.stream_events {
                     let (tx, rx) = tokio::sync::mpsc::channel(events.len().max(1));
@@ -778,7 +835,29 @@ max_tool_rounds = 3
     #[tokio::test]
     async fn test_consecutive_errors_triggers_stop() {
         let memory = test_memory().await;
-        let config = test_config(); // max_tool_rounds = 3, max_consecutive_tool_errors = 3
+        let config = Arc::new(
+            AppConfig::load_from_str(
+                r#"
+[app]
+name = "test"
+workspace = "./test_workspace_nonexistent"
+log_level = "info"
+
+[feishu]
+app_id = "test"
+app_secret = "test"
+
+[llm]
+provider = "anthropic"
+model = "test"
+api_key = "test"
+
+[agent]
+max_tool_rounds = 10
+"#,
+            )
+            .unwrap(),
+        );
 
         // Mock always returns tool call to a non-existent command (will produce an error result)
         let mock_llm = Arc::new(MockLlm::new(vec![
@@ -804,14 +883,18 @@ max_tool_rounds = 3
         ));
         let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
 
-        let (_reply, persist) = agent.handle(&test_inbound(), &[]).await;
+        let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
 
-        // After 3 consecutive failures (max_consecutive_tool_errors=3),
-        // a stop hint user message should appear in the persist messages.
-        let has_stop_hint = persist
-            .iter()
-            .any(|m| m.content.contains("consecutive rounds of tool failures"));
-        assert!(has_stop_hint, "stop hint should be injected after consecutive failures");
+        assert!(reply.content.contains("多轮工具执行失败"));
+        assert!(!reply.content.contains("最大轮次限制"));
+
+        let has_failure_summary = persist.iter().any(|m| {
+            m.role == crate::types::Role::Assistant && m.content.contains("多轮工具执行失败")
+        });
+        assert!(
+            has_failure_summary,
+            "failure summary should be persisted after consecutive failures"
+        );
     }
 
     #[tokio::test]
@@ -862,6 +945,9 @@ max_tool_rounds = 3
         let has_stop_hint = persist
             .iter()
             .any(|m| m.content.contains("consecutive rounds of tool failures"));
-        assert!(!has_stop_hint, "stop hint should NOT appear when success resets counter");
+        assert!(
+            !has_stop_hint,
+            "stop hint should NOT appear when success resets counter"
+        );
     }
 }

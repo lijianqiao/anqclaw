@@ -130,8 +130,8 @@ impl CustomTool {
     }
 
     fn decode_output(bytes: &[u8]) -> String {
-        match String::from_utf8(bytes.to_vec()) {
-            Ok(text) => text,
+        match std::str::from_utf8(bytes) {
+            Ok(text) => text.to_string(),
             Err(_) => {
                 #[cfg(target_os = "windows")]
                 {

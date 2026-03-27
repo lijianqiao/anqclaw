@@ -60,6 +60,7 @@ impl PermissionLevel {
     }
 }
 
+#[derive(Clone)]
 pub struct ShellExec {
     permission_level: PermissionLevel,
     /// For Readonly: only READONLY_COMMANDS
@@ -291,8 +292,8 @@ impl ShellExec {
     }
 
     fn decode_command_output(bytes: &[u8]) -> String {
-        match String::from_utf8(bytes.to_vec()) {
-            Ok(text) => text,
+        match std::str::from_utf8(bytes) {
+            Ok(text) => text.to_string(),
             Err(_) => {
                 #[cfg(target_os = "windows")]
                 {
@@ -606,7 +607,7 @@ impl ShellExec {
         }
     }
 
-    fn ensure_managed_python_runtime(&self) -> Result<PathBuf> {
+    fn ensure_managed_python_runtime_blocking(&self) -> Result<PathBuf> {
         let Some(venv_abs) = self.managed_venv_path() else {
             bail!("managed Python runtime requested without a configured venv path")
         };
@@ -699,10 +700,17 @@ impl ShellExec {
         Ok(venv_abs)
     }
 
+    async fn ensure_managed_python_runtime(&self) -> Result<PathBuf> {
+        let shell = self.clone();
+        tokio::task::spawn_blocking(move || shell.ensure_managed_python_runtime_blocking())
+            .await
+            .map_err(|error| anyhow::anyhow!("managed runtime bootstrap task failed: {error}"))?
+    }
+
     /// Rewrite a command to run inside the venv if it's a pip/uv install or
     /// python invocation. Replaces the bare `python`/`pip` with the venv's
     /// absolute path — no activate needed, works on all platforms.
-    fn rewrite_for_venv(&self, command: &str) -> Result<(String, bool)> {
+    async fn rewrite_for_venv(&self, command: &str) -> Result<(String, bool)> {
         let Some(_) = &self.venv_path else {
             return Ok((command.to_string(), false));
         };
@@ -725,7 +733,7 @@ impl ShellExec {
             return Ok((command.to_string(), false));
         };
 
-        let venv_abs = self.ensure_managed_python_runtime()?;
+        let venv_abs = self.ensure_managed_python_runtime().await?;
         let needs_create = !venv_abs.join("pyvenv.cfg").exists();
 
         // Build absolute path to the binary inside venv
@@ -782,7 +790,7 @@ impl ShellExec {
         self.check_blocked_dirs(command)?;
 
         // Rewrite pip/python commands to use venv if configured
-        let (command, _venv_created) = self.rewrite_for_venv(command)?;
+        let (command, _venv_created) = self.rewrite_for_venv(command).await?;
         let command = command.as_str();
         let timeout = self.effective_timeout(command);
         let managed_runtime = Self::uses_managed_python_runtime(command);

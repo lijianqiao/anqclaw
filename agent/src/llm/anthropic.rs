@@ -10,6 +10,7 @@
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -26,7 +27,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 pub struct AnthropicClient {
     http: reqwest::Client,
-    api_key: String,
+    api_key: secrecy::SecretString,
     model: String,
     max_tokens: u32,
     temperature: f32,
@@ -41,7 +42,7 @@ impl AnthropicClient {
 
         Ok(Self {
             http,
-            api_key: config.api_key.expose_secret().to_string(),
+            api_key: config.api_key.clone(),
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             temperature: config.temperature,
@@ -62,18 +63,18 @@ impl AnthropicClient {
             .join("\n\n");
 
         // 2. Convert non-system messages to Anthropic format
-        let ant_messages: Vec<AntMessage> = messages
+        let ant_messages: Vec<AntMessage<'_>> = messages
             .iter()
             .filter(|m| m.role != Role::System)
-            .map(to_ant_message)
+            .map(|msg| to_ant_message(msg))
             .collect();
 
         // 3. Convert tool definitions
-        let ant_tools: Vec<AntTool> = tools.iter().map(to_ant_tool).collect();
+        let ant_tools: Vec<AntTool<'_>> = tools.iter().map(|tool| to_ant_tool(tool)).collect();
 
         // 4. Build request body
         let mut body = AntRequest {
-            model: self.model.clone(),
+            model: self.model.as_str(),
             max_tokens: self.max_tokens,
             temperature: Some(self.temperature),
             system: if system_text.is_empty() {
@@ -94,8 +95,8 @@ impl AnthropicClient {
         // If the history is empty (e.g. heartbeat), inject a placeholder.
         if body.messages.is_empty() {
             body.messages.push(AntMessage {
-                role: "user".into(),
-                content: AntContent::Text("(no user input)".into()),
+                role: "user",
+                content: AntContent::Text(Cow::Borrowed("(no user input)")),
             });
         }
 
@@ -111,7 +112,7 @@ impl AnthropicClient {
             let resp = self
                 .http
                 .post(ANTHROPIC_API_URL)
-                .header("x-api-key", &self.api_key)
+                .header("x-api-key", self.api_key.expose_secret())
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .header("content-type", "application/json")
                 .json(&body)
@@ -120,10 +121,8 @@ impl AnthropicClient {
 
             match resp {
                 Ok(r) if r.status().is_success() => {
-                    let ant_resp: AntResponse = r
-                        .json()
-                        .await
-                        .context("deserialise Anthropic response")?;
+                    let ant_resp: AntResponse =
+                        r.json().await.context("deserialise Anthropic response")?;
                     return parse_ant_response(ant_resp);
                 }
                 Ok(r)
@@ -163,16 +162,16 @@ impl AnthropicClient {
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        let ant_messages: Vec<AntMessage> = messages
+        let ant_messages: Vec<AntMessage<'_>> = messages
             .iter()
             .filter(|m| m.role != Role::System)
-            .map(to_ant_message)
+            .map(|msg| to_ant_message(msg))
             .collect();
 
-        let ant_tools: Vec<AntTool> = tools.iter().map(to_ant_tool).collect();
+        let ant_tools: Vec<AntTool<'_>> = tools.iter().map(|tool| to_ant_tool(tool)).collect();
 
         let mut body = AntRequest {
-            model: self.model.clone(),
+            model: self.model.as_str(),
             max_tokens: self.max_tokens,
             temperature: Some(self.temperature),
             system: if system_text.is_empty() {
@@ -191,15 +190,15 @@ impl AnthropicClient {
 
         if body.messages.is_empty() {
             body.messages.push(AntMessage {
-                role: "user".into(),
-                content: AntContent::Text("(no user input)".into()),
+                role: "user",
+                content: AntContent::Text(Cow::Borrowed("(no user input)")),
             });
         }
 
         let resp = self
             .http
             .post(ANTHROPIC_API_URL)
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", self.api_key.expose_secret())
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
             .json(&body)
@@ -215,7 +214,7 @@ impl AnthropicClient {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
         tokio::spawn(async move {
-            let mut buffer = String::new();
+            let mut buffer = Vec::new();
             let mut full_text = String::new();
             let mut tc_acc: std::collections::HashMap<usize, (String, String, String)> =
                 std::collections::HashMap::new();
@@ -226,7 +225,7 @@ impl AnthropicClient {
             while !done {
                 match response.chunk().await {
                     Ok(Some(chunk)) => {
-                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        buffer.extend_from_slice(&chunk);
                         if buffer.len() > MAX_BUFFER_SIZE {
                             tracing::warn!("Anthropic SSE buffer exceeded limit, truncating");
                             break;
@@ -235,11 +234,7 @@ impl AnthropicClient {
                     _ => break,
                 }
 
-                while let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim_end().to_string();
-                    // Efficient: drain processed bytes instead of copying entire remainder
-                    buffer.drain(..=pos);
-
+                for line in drain_complete_sse_lines(&mut buffer) {
                     let data = match line.strip_prefix("data: ") {
                         Some(d) => d,
                         None => continue,
@@ -249,10 +244,7 @@ impl AnthropicClient {
                         continue;
                     };
 
-                    let event_type = event
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
                     match event_type {
                         "content_block_delta" => {
@@ -261,22 +253,17 @@ impl AnthropicClient {
                                 delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             match delta_type {
                                 "text_delta" => {
-                                    if let Some(text) =
-                                        delta.get("text").and_then(|v| v.as_str())
+                                    if let Some(text) = delta.get("text").and_then(|v| v.as_str())
                                         && !text.is_empty()
                                     {
                                         full_text.push_str(text);
-                                        let _ = tx
-                                            .send(StreamEvent::Delta(text.to_string()))
-                                            .await;
+                                        let _ = tx.send(StreamEvent::Delta(text.to_string())).await;
                                     }
                                 }
                                 "input_json_delta" => {
-                                    let index = event
-                                        .get("index")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0)
-                                        as usize;
+                                    let index =
+                                        event.get("index").and_then(|v| v.as_u64()).unwrap_or(0)
+                                            as usize;
                                     if let Some(partial) =
                                         delta.get("partial_json").and_then(|v| v.as_str())
                                     {
@@ -291,10 +278,7 @@ impl AnthropicClient {
                             let block_type =
                                 block.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             if block_type == "tool_use" {
-                                let index = event
-                                    .get("index")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
+                                let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0)
                                     as usize;
                                 let id = block
                                     .get("id")
@@ -327,8 +311,7 @@ impl AnthropicClient {
                     Some(v) => v,
                     None => continue,
                 };
-                let arguments =
-                    serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+                let arguments = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
                 tool_calls.push(ToolCall {
                     id,
                     name,
@@ -364,9 +347,37 @@ impl LlmClient for AnthropicClient {
         &'a self,
         messages: &'a [ChatMessage],
         tools: &'a [ToolDefinition],
-    ) -> Pin<Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>>
+    {
         Box::pin(self.do_chat_stream(messages, tools))
     }
+}
+
+fn drain_complete_sse_lines(buffer: &mut Vec<u8>) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut cursor = 0;
+
+    while let Some(rel_pos) = buffer[cursor..].iter().position(|&byte| byte == b'\n') {
+        let pos = cursor + rel_pos;
+        let line_bytes = if pos > cursor && buffer[pos - 1] == b'\r' {
+            &buffer[cursor..pos - 1]
+        } else {
+            &buffer[cursor..pos]
+        };
+
+        match std::str::from_utf8(line_bytes) {
+            Ok(line) => lines.push(line.to_owned()),
+            Err(err) => tracing::warn!(?err, "dropping invalid UTF-8 Anthropic SSE line"),
+        }
+
+        cursor = pos + 1;
+    }
+
+    if cursor > 0 {
+        buffer.drain(..cursor);
+    }
+
+    lines
 }
 
 // ─── Anthropic wire types (private) ──────────────────────────────────────────
@@ -374,69 +385,69 @@ impl LlmClient for AnthropicClient {
 // ── Request ──
 
 #[derive(Serialize)]
-struct AntRequest {
-    model: String,
+struct AntRequest<'a> {
+    model: &'a str,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
-    messages: Vec<AntMessage>,
+    messages: Vec<AntMessage<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<AntTool>>,
+    tools: Option<Vec<AntTool<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
 }
 
 #[derive(Serialize)]
-struct AntMessage {
-    role: String,
-    content: AntContent,
+struct AntMessage<'a> {
+    role: &'static str,
+    content: AntContent<'a>,
 }
 
 /// Anthropic content can be a simple string or an array of content blocks.
 #[derive(Serialize)]
 #[serde(untagged)]
-enum AntContent {
-    Text(String),
-    Blocks(Vec<AntContentBlock>),
+enum AntContent<'a> {
+    Text(Cow<'a, str>),
+    Blocks(Vec<AntContentBlock<'a>>),
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type")]
-enum AntContentBlock {
+enum AntContentBlock<'a> {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text { text: Cow<'a, str> },
     #[serde(rename = "image")]
-    Image { source: AntImageSource },
+    Image { source: AntImageSource<'a> },
     #[serde(rename = "tool_use")]
     ToolUse {
-        id: String,
-        name: String,
-        input: serde_json::Value,
+        id: &'a str,
+        name: &'a str,
+        input: &'a serde_json::Value,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
-        tool_use_id: String,
-        content: String,
+        tool_use_id: Cow<'a, str>,
+        content: Cow<'a, str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
 }
 
 #[derive(Serialize)]
-struct AntImageSource {
+struct AntImageSource<'a> {
     #[serde(rename = "type")]
-    source_type: String, // "base64"
-    media_type: String,  // e.g. "image/jpeg"
-    data: String,        // base64-encoded image bytes
+    source_type: &'static str, // "base64"
+    media_type: Cow<'a, str>, // e.g. "image/jpeg"
+    data: Cow<'a, str>,       // base64-encoded image bytes
 }
 
 #[derive(Serialize)]
-struct AntTool {
-    name: String,
-    description: String,
-    input_schema: serde_json::Value,
+struct AntTool<'a> {
+    name: &'a str,
+    description: &'a str,
+    input_schema: &'a serde_json::Value,
 }
 
 // ── Response ──
@@ -461,13 +472,13 @@ enum AntResponseBlock {
 
 // ─── Mapping helpers ─────────────────────────────────────────────────────────
 
-fn to_ant_message(msg: &ChatMessage) -> AntMessage {
+fn to_ant_message(msg: &ChatMessage) -> AntMessage<'_> {
     match msg.role {
         Role::System => {
             // Should not reach here (filtered out above), but handle gracefully.
             AntMessage {
-                role: "user".into(),
-                content: AntContent::Text(msg.content.clone()),
+                role: "user",
+                content: AntContent::Text(Cow::Borrowed(msg.content.as_str())),
             }
         }
         Role::User => {
@@ -477,25 +488,25 @@ fn to_ant_message(msg: &ChatMessage) -> AntMessage {
                 for img in images {
                     blocks.push(AntContentBlock::Image {
                         source: AntImageSource {
-                            source_type: "base64".into(),
-                            media_type: img.media_type.clone(),
-                            data: img.data.clone(),
+                            source_type: "base64",
+                            media_type: Cow::Borrowed(img.media_type.as_str()),
+                            data: Cow::Borrowed(img.data.as_str()),
                         },
                     });
                 }
                 if !msg.content.is_empty() {
                     blocks.push(AntContentBlock::Text {
-                        text: msg.content.clone(),
+                        text: Cow::Borrowed(msg.content.as_str()),
                     });
                 }
                 AntMessage {
-                    role: "user".into(),
+                    role: "user",
                     content: AntContent::Blocks(blocks),
                 }
             } else {
                 AntMessage {
-                    role: "user".into(),
-                    content: AntContent::Text(msg.content.clone()),
+                    role: "user",
+                    content: AntContent::Text(Cow::Borrowed(msg.content.as_str())),
                 }
             }
         }
@@ -506,24 +517,24 @@ fn to_ant_message(msg: &ChatMessage) -> AntMessage {
                     let mut blocks = Vec::new();
                     if !msg.content.is_empty() {
                         blocks.push(AntContentBlock::Text {
-                            text: msg.content.clone(),
+                            text: Cow::Borrowed(msg.content.as_str()),
                         });
                     }
                     for call in calls {
                         blocks.push(AntContentBlock::ToolUse {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            input: call.arguments.clone(),
+                            id: call.id.as_str(),
+                            name: call.name.as_str(),
+                            input: &call.arguments,
                         });
                     }
                     AntMessage {
-                        role: "assistant".into(),
+                        role: "assistant",
                         content: AntContent::Blocks(blocks),
                     }
                 }
                 _ => AntMessage {
-                    role: "assistant".into(),
-                    content: AntContent::Text(msg.content.clone()),
+                    role: "assistant",
+                    content: AntContent::Text(Cow::Borrowed(msg.content.as_str())),
                 },
             }
         }
@@ -531,23 +542,27 @@ fn to_ant_message(msg: &ChatMessage) -> AntMessage {
             // Tool result → user message with tool_result content block.
             // Anthropic requires tool results to be sent as a "user" role message.
             let block = AntContentBlock::ToolResult {
-                tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
-                content: msg.content.clone(),
+                tool_use_id: msg
+                    .tool_call_id
+                    .as_deref()
+                    .map(Cow::Borrowed)
+                    .unwrap_or_default(),
+                content: Cow::Borrowed(msg.content.as_str()),
                 is_error: None,
             };
             AntMessage {
-                role: "user".into(),
+                role: "user",
                 content: AntContent::Blocks(vec![block]),
             }
         }
     }
 }
 
-fn to_ant_tool(def: &ToolDefinition) -> AntTool {
+fn to_ant_tool(def: &ToolDefinition) -> AntTool<'_> {
     AntTool {
-        name: def.name.clone(),
-        description: def.description.clone(),
-        input_schema: def.parameters.clone(),
+        name: def.name.as_str(),
+        description: def.description.as_str(),
+        input_schema: &def.parameters,
     }
 }
 
@@ -577,4 +592,41 @@ fn parse_ant_response(resp: AntResponse) -> Result<LlmResponse> {
     };
 
     Ok(LlmResponse { text, tool_calls })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drain_complete_sse_lines;
+
+    #[test]
+    fn drain_complete_sse_lines_handles_split_utf8_across_chunks() {
+        let mut buffer = b"data: {\"text\":\"".to_vec();
+        buffer.extend_from_slice(&[0xE4, 0xBD]);
+
+        assert!(drain_complete_sse_lines(&mut buffer).is_empty());
+
+        buffer.extend_from_slice(&[0xA0, b'"', b'}', b'\n']);
+
+        assert_eq!(
+            drain_complete_sse_lines(&mut buffer),
+            vec![format!("data: {{\"text\":\"{}\"}}", '\u{4F60}')]
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn drain_complete_sse_lines_preserves_partial_tail() {
+        let mut buffer = b"data: first\ndata: second".to_vec();
+
+        assert_eq!(drain_complete_sse_lines(&mut buffer), vec!["data: first"]);
+        assert_eq!(buffer, b"data: second");
+    }
+
+    #[test]
+    fn drain_complete_sse_lines_trims_crlf() {
+        let mut buffer = b"data: first\r\n".to_vec();
+
+        assert_eq!(drain_complete_sse_lines(&mut buffer), vec!["data: first"]);
+        assert!(buffer.is_empty());
+    }
 }

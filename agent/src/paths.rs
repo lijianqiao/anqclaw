@@ -4,6 +4,32 @@
 //! `~/.anqclaw/` unless an absolute path is given.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+fn home_base_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("ANQCLAW_HOME") {
+        return PathBuf::from(path);
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        return home;
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        tracing::warn!(
+            fallback = %cwd.display(),
+            "cannot determine home directory; falling back to current working directory"
+        );
+        return cwd;
+    }
+
+    let temp = std::env::temp_dir();
+    tracing::warn!(
+        fallback = %temp.display(),
+        "cannot determine home directory; falling back to temp directory"
+    );
+    temp
+}
 
 /// Returns the anqclaw home directory: `~/.anqclaw/`
 ///
@@ -12,9 +38,11 @@ use std::path::{Path, PathBuf};
 /// - macOS:   `/Users/<user>/.anqclaw`
 /// - Linux:   `/home/<user>/.anqclaw`
 pub fn anqclaw_home() -> PathBuf {
-    dirs::home_dir()
-        .expect("cannot determine home directory")
-        .join(".anqclaw")
+    static ANQCLAW_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+    ANQCLAW_HOME
+        .get_or_init(|| home_base_dir().join(".anqclaw"))
+        .clone()
 }
 
 /// Resolves a path relative to `base`.
@@ -39,15 +67,13 @@ pub fn resolve_path(base: &Path, relative: &str) -> PathBuf {
 /// Resolves a configured path relative to `~/.anqclaw/` and supports `~/...`.
 pub fn resolve_configured_path(relative: &str) -> PathBuf {
     if relative == "~" {
-        return dirs::home_dir().expect("cannot determine home directory");
+        return home_base_dir();
     }
     if let Some(rest) = relative
         .strip_prefix("~/")
         .or_else(|| relative.strip_prefix("~\\"))
     {
-        return dirs::home_dir()
-            .expect("cannot determine home directory")
-            .join(rest);
+        return home_base_dir().join(rest);
     }
 
     resolve_path(&anqclaw_home(), relative)

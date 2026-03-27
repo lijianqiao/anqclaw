@@ -208,13 +208,22 @@ impl ToolRegistry {
         &self.definitions_cache
     }
 
-    /// Executes a batch of tool calls concurrently.
+    /// Maximum number of tool calls executed concurrently per batch.
+    /// Prevents resource exhaustion if the LLM returns many tool calls at once.
+    const MAX_CONCURRENT_TOOLS: usize = 8;
+
+    /// Executes a batch of tool calls with bounded concurrency.
     ///
-    /// Each call runs in its own spawned task. Failures are captured as
-    /// `ToolResult { is_error: true, .. }` so the LLM can see the error and
-    /// decide how to proceed.
+    /// At most `MAX_CONCURRENT_TOOLS` calls run simultaneously. Failures are
+    /// captured as `ToolResult { is_error: true, .. }` so the LLM can see the
+    /// error and decide how to proceed.
+    ///
+    /// Results are returned in the **same order** as the input `calls`.
     pub async fn execute_batch(&self, calls: &[ToolCall]) -> Vec<ToolResult> {
-        let futs: Vec<_> = calls
+        use futures::stream::{FuturesOrdered, StreamExt};
+
+        // Pre-resolve tools and build futures (not yet polled)
+        let mut pending: std::collections::VecDeque<_> = calls
             .iter()
             .map(|call| {
                 let call_id = call.id.clone();
@@ -246,6 +255,26 @@ impl ToolRegistry {
             })
             .collect();
 
-        futures::future::join_all(futs).await
+        let mut in_flight = FuturesOrdered::new();
+        let mut results = Vec::with_capacity(calls.len());
+
+        // Seed initial batch up to concurrency limit
+        while in_flight.len() < Self::MAX_CONCURRENT_TOOLS {
+            if let Some(fut) = pending.pop_front() {
+                in_flight.push_back(fut);
+            } else {
+                break;
+            }
+        }
+
+        // As each completes, feed the next pending future
+        while let Some(result) = in_flight.next().await {
+            results.push(result);
+            if let Some(fut) = pending.pop_front() {
+                in_flight.push_back(fut);
+            }
+        }
+
+        results
     }
 }
