@@ -275,10 +275,25 @@ async fn listen_ws(
                     seen_ids.insert(lark_msg_id.clone(), now);
                 }
 
+                // Debug: log raw message type and content for diagnosis
+                tracing::debug!(
+                    msg_id = %lark_msg_id,
+                    msg_type = %recv.message.message_type,
+                    content = %recv.message.content,
+                    "Feishu WS: raw incoming message"
+                );
+
                 // Convert to InboundMessage
                 let inbound = match recv.into_inbound() {
-                    Some(msg) => msg,
-                    None => continue,
+                    Ok(msg) => msg,
+                    Err(reason) => {
+                        tracing::warn!(
+                            msg_id = %lark_msg_id,
+                            reason = %reason,
+                            "Feishu WS: message dropped during conversion"
+                        );
+                        continue;
+                    }
                 };
 
                 tracing::debug!(

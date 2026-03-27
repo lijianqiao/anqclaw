@@ -131,30 +131,41 @@ impl MsgReceivePayload {
     /// - `text`  → `MessageContent::Text`
     /// - `image` → `MessageContent::Image`
     /// - `file`  → `MessageContent::File`
-    /// - `post`  → `MessageContent::RichText`
-    /// - other   → `MessageContent::Text("[unsupported: {type}]")`
-    pub fn into_inbound(self) -> Option<InboundMessage> {
+    /// - `post`  → `MessageContent::Text` (extracted as markdown text)
+    /// - other   → `MessageContent::Text` (raw content as fallback)
+    ///
+    /// Returns `Err` with a reason string when the message cannot be converted,
+    /// so the caller can log the cause instead of silently dropping it.
+    pub fn into_inbound(self) -> Result<InboundMessage, String> {
         let sender_id = self.sender.sender_id.open_id.unwrap_or_default();
         let lark_msg = self.message;
+        let msg_type = lark_msg.message_type.as_str();
 
-        let content = match lark_msg.message_type.as_str() {
+        let content = match msg_type {
             "text" => {
-                let v: serde_json::Value = serde_json::from_str(&lark_msg.content).ok()?;
+                let v: serde_json::Value = serde_json::from_str(&lark_msg.content)
+                    .map_err(|e| format!("text content parse failed: {e}"))?;
                 let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("");
                 let text = strip_at_placeholders(text).trim().to_string();
                 if text.is_empty() {
-                    return None;
+                    return Err("text content is empty after stripping mentions".into());
                 }
                 MessageContent::Text(text)
             }
             "image" => {
-                let v: serde_json::Value = serde_json::from_str(&lark_msg.content).ok()?;
-                let key = v.get("image_key").and_then(|k| k.as_str())?.to_string();
+                let v: serde_json::Value = serde_json::from_str(&lark_msg.content)
+                    .map_err(|e| format!("image content parse failed: {e}"))?;
+                let key = v.get("image_key").and_then(|k| k.as_str())
+                    .ok_or("image content missing image_key")?
+                    .to_string();
                 MessageContent::Image { key, image_data: None }
             }
             "file" => {
-                let v: serde_json::Value = serde_json::from_str(&lark_msg.content).ok()?;
-                let key = v.get("file_key").and_then(|k| k.as_str())?.to_string();
+                let v: serde_json::Value = serde_json::from_str(&lark_msg.content)
+                    .map_err(|e| format!("file content parse failed: {e}"))?;
+                let key = v.get("file_key").and_then(|k| k.as_str())
+                    .ok_or("file content missing file_key")?
+                    .to_string();
                 let name = v
                     .get("file_name")
                     .and_then(|n| n.as_str())
@@ -163,20 +174,53 @@ impl MsgReceivePayload {
                 MessageContent::File { key, name, file_bytes: None }
             }
             "post" => {
-                // Rich text (post) — extract plain text from structured content
-                let v: serde_json::Value = serde_json::from_str(&lark_msg.content).ok()?;
+                // Rich text (post) — extract plain text from structured content.
+                // Feishu markdown input often arrives as "post" type with markdown
+                // elements inside the content array.
+                let v: serde_json::Value = serde_json::from_str(&lark_msg.content)
+                    .map_err(|e| format!("post content parse failed: {e}"))?;
                 let text = extract_post_text(&v);
                 if text.trim().is_empty() {
-                    return None;
+                    // Fallback: the structured extraction missed content (e.g.
+                    // unknown element tags). Try the raw JSON string so we don't
+                    // silently discard user messages.
+                    let fallback = extract_fallback_text(&lark_msg.content);
+                    if fallback.is_empty() {
+                        return Err(format!(
+                            "post content is empty after extraction, raw: {}",
+                            truncate_str(&lark_msg.content, 300),
+                        ));
+                    }
+                    tracing::warn!(
+                        raw_content = %truncate_str(&lark_msg.content, 200),
+                        "Feishu: post text extraction empty, using fallback"
+                    );
+                    MessageContent::Text(fallback)
+                } else {
+                    // Normalize to Text so downstream (agent/LLM) never needs
+                    // to understand channel-specific rich text JSON structures.
+                    MessageContent::Text(text)
                 }
-                MessageContent::RichText(v)
             }
-            other => {
-                MessageContent::Text(format!("[不支持的消息类型: {other}]"))
+            _ => {
+                // Unknown message type — try to extract any usable text from raw
+                // content rather than discarding it.
+                let fallback = extract_fallback_text(&lark_msg.content);
+                if fallback.is_empty() {
+                    return Err(format!(
+                        "unsupported message_type '{msg_type}', raw content: {}",
+                        truncate_str(&lark_msg.content, 200),
+                    ));
+                }
+                tracing::info!(
+                    msg_type,
+                    "Feishu: extracted text from unsupported message type"
+                );
+                MessageContent::Text(fallback)
             }
         };
 
-        Some(InboundMessage {
+        Ok(InboundMessage {
             channel: "feishu".into(),
             chat_id: lark_msg.chat_id,
             sender_id,
@@ -222,36 +266,142 @@ fn strip_at_placeholders(text: &str) -> String {
 
 /// Extracts plain text from a Feishu "post" (rich text) content JSON.
 ///
-/// Post format: `{ "zh_cn": { "content": [[{"tag": "text", "text": "..."}, ...]] } }`
+/// Feishu sends post content in two possible shapes:
+/// 1. Locale-wrapped: `{ "zh_cn": { "content": [[...]] } }`
+/// 2. Flat (no locale): `{ "title": "...", "content": [[...]] }`
+///
+/// Handles element tags: text, markdown, a, code_block. Skips: at, img, etc.
 fn extract_post_text(v: &serde_json::Value) -> String {
-    let mut text = String::new();
-
-    // Try common locale keys
-    let locales = ["zh_cn", "en_us", "ja_jp", "zh_hk", "zh_tw"];
-    let post = locales
-        .iter()
-        .find_map(|locale| v.get(locale))
+    // Locate the content array — try two structures:
+    // 1. Top-level "content" (flat / no locale wrapper)
+    // 2. Under a locale key like "zh_cn"
+    let content = v
+        .get("content")
+        .and_then(|c| c.as_array())
         .or_else(|| {
-            // Fall back to first key
-            v.as_object().and_then(|obj| obj.values().next())
+            let locales = ["zh_cn", "en_us", "ja_jp", "zh_hk", "zh_tw"];
+            locales
+                .iter()
+                .find_map(|locale| v.get(locale))
+                .or_else(|| {
+                    // Fall back to first object value that has "content"
+                    v.as_object()
+                        .and_then(|obj| obj.values().find(|val| val.get("content").is_some()))
+                })
+                .and_then(|post| post.get("content"))
+                .and_then(|c| c.as_array())
         });
 
-    if let Some(post) = post
-        && let Some(content) = post.get("content").and_then(|c| c.as_array())
-    {
-        for paragraph in content {
-            if let Some(elements) = paragraph.as_array() {
-                for elem in elements {
+    let Some(content) = content else {
+        return String::new();
+    };
+
+    let mut text = String::new();
+    for paragraph in content {
+        let Some(elements) = paragraph.as_array() else {
+            continue;
+        };
+        for elem in elements {
+            let tag = elem.get("tag").and_then(|t| t.as_str()).unwrap_or("");
+            match tag {
+                "text" | "markdown" => {
+                    if let Some(t) = elem.get("text").and_then(|t| t.as_str()) {
+                        text.push_str(t);
+                    }
+                    if let Some(t) = elem.get("content").and_then(|t| t.as_str()) {
+                        text.push_str(t);
+                    }
+                }
+                "a" => {
                     if let Some(t) = elem.get("text").and_then(|t| t.as_str()) {
                         text.push_str(t);
                     }
                 }
-                text.push('\n');
+                "code_block" => {
+                    let lang = elem
+                        .get("language")
+                        .and_then(|l| l.as_str())
+                        .unwrap_or("");
+                    // Map Feishu's "PLAIN_TEXT" to empty, keep real languages
+                    let lang_tag = if lang.is_empty() || lang.eq_ignore_ascii_case("PLAIN_TEXT") {
+                        ""
+                    } else {
+                        lang
+                    };
+                    if let Some(t) = elem.get("text").and_then(|t| t.as_str()) {
+                        text.push_str("```");
+                        text.push_str(lang_tag);
+                        text.push('\n');
+                        text.push_str(t);
+                        if !t.ends_with('\n') {
+                            text.push('\n');
+                        }
+                        text.push_str("```");
+                    }
+                }
+                // Skip: "at", "img", "media", "emotion" etc.
+                _ => {}
+            }
+        }
+        text.push('\n');
+    }
+
+    text
+}
+
+/// Try to extract usable text from raw content JSON of unknown message types.
+/// Looks for common fields: "text", "content" (string or post-array), "title".
+fn extract_fallback_text(raw_content: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(raw_content) {
+        Ok(v) => v,
+        Err(_) => {
+            // Not JSON — use raw string if it looks like text
+            let trimmed = raw_content.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('\0') {
+                return trimmed.to_string();
+            }
+            return String::new();
+        }
+    };
+
+    // Try string fields first
+    for key in &["text", "title"] {
+        if let Some(s) = v.get(key).and_then(|t| t.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() {
+                return s.to_string();
             }
         }
     }
 
-    text
+    // "content" might be a string OR a post-style array — try both
+    if let Some(content) = v.get("content") {
+        if let Some(s) = content.as_str() {
+            let s = s.trim();
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+        // Try as post-style content array
+        let post_text = extract_post_text(&v);
+        if !post_text.trim().is_empty() {
+            return post_text;
+        }
+    }
+
+    String::new()
+}
+
+/// Truncate a string to at most `max` bytes at a char boundary.
+fn truncate_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Max byte size for a single interactive card's markdown content.
@@ -320,4 +470,99 @@ pub fn split_markdown_chunks(text: &str, max_bytes: usize) -> Vec<&str> {
     }
 
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Flat post (no locale wrapper) — this is what Feishu actually sends
+    /// when a user types markdown with code blocks in the chat box.
+    #[test]
+    fn test_extract_post_text_flat_with_code_block() {
+        let v: serde_json::Value = serde_json::json!({
+            "title": "",
+            "content": [[
+                {"tag": "text", "text": "请阅读以下代码：", "style": []},
+                {"tag": "code_block", "language": "Python", "text": "def foo():\n    pass"}
+            ]]
+        });
+        let text = extract_post_text(&v);
+        assert!(text.contains("请阅读以下代码："), "should contain text element");
+        assert!(text.contains("```Python"), "should contain language tag");
+        assert!(text.contains("def foo():\n    pass"), "should contain code");
+        assert!(text.contains("```"), "should close code block");
+    }
+
+    /// Locale-wrapped post (classic format).
+    #[test]
+    fn test_extract_post_text_locale_wrapped() {
+        let v: serde_json::Value = serde_json::json!({
+            "zh_cn": {
+                "content": [[
+                    {"tag": "text", "text": "你好"},
+                    {"tag": "a", "text": "链接", "href": "https://example.com"}
+                ]]
+            }
+        });
+        let text = extract_post_text(&v);
+        assert!(text.contains("你好"));
+        assert!(text.contains("链接"));
+    }
+
+    /// code_block with PLAIN_TEXT language should not emit a language tag.
+    #[test]
+    fn test_extract_post_text_code_block_plain_text() {
+        let v: serde_json::Value = serde_json::json!({
+            "content": [[
+                {"tag": "code_block", "language": "PLAIN_TEXT", "text": "hello world"}
+            ]]
+        });
+        let text = extract_post_text(&v);
+        assert!(text.contains("```\n"), "PLAIN_TEXT should produce bare ```");
+        assert!(!text.contains("```PLAIN_TEXT"));
+    }
+
+    /// Fallback should handle content as a post-style array.
+    #[test]
+    fn test_extract_fallback_text_post_array() {
+        let raw = r#"{"title":"","content":[[{"tag":"text","text":"hello from fallback"}]]}"#;
+        let text = extract_fallback_text(raw);
+        assert!(text.contains("hello from fallback"));
+    }
+
+    /// into_inbound should succeed for the exact payload from the bug report.
+    #[test]
+    fn test_into_inbound_flat_post_with_code_block() {
+        let payload = MsgReceivePayload {
+            sender: LarkSender {
+                sender_id: LarkSenderId { open_id: Some("ou_test".into()) },
+                sender_type: "user".into(),
+            },
+            message: LarkMessage {
+                message_id: "om_test".into(),
+                chat_id: "oc_test".into(),
+                chat_type: "p2p".into(),
+                message_type: "post".into(),
+                content: serde_json::json!({
+                    "title": "",
+                    "content": [[
+                        {"tag": "at", "user_id": "@_user_1", "user_name": "anqclaw", "style": []},
+                        {"tag": "text", "text": " 请阅读以下代码：", "style": []},
+                        {"tag": "code_block", "language": "PLAIN_TEXT", "text": "def func(nums):\n    pass"}
+                    ]]
+                }).to_string(),
+            },
+        };
+        let result = payload.into_inbound();
+        assert!(result.is_ok(), "should not drop the message: {:?}", result.err());
+        let msg = result.unwrap();
+        match &msg.content {
+            MessageContent::Text(t) => {
+                assert!(t.contains("请阅读以下代码"), "text: {t}");
+                assert!(t.contains("def func(nums)"), "should contain code: {t}");
+            }
+            other => panic!("expected Text, got: {other:?}"),
+        }
+    }
 }
