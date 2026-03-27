@@ -116,7 +116,7 @@ impl AgentCore {
             .as_ref()
             .map(|r| r.build_summary())
             .unwrap_or_default();
-        let system_prompt = build_system_prompt(&self.config, &skill_summary, &self.env_probe);
+        let system_prompt = build_system_prompt(&self.config, &skill_summary, &self.env_probe).await;
 
         // 2. Search relevant memories
         let user_text = msg.content.to_text();
@@ -387,13 +387,14 @@ impl AgentCore {
                     messages.push(ChatMessage::tool_result(result));
                 }
 
-                // Consecutive error protection: if all tools failed this round, increment counter
-                let all_failed = results.iter().all(|r| {
+                // Consecutive error protection: if majority of tools failed this round,
+                // increment counter
+                let failed_count = results.iter().filter(|r| {
                     r.is_error
                         || (r.output.contains("[exit code:")
                             && !r.output.contains("[exit code: 0]"))
-                });
-                if all_failed {
+                }).count();
+                if failed_count * 2 > results.len() {
                     consecutive_errors += 1;
                     if consecutive_errors >= max_consecutive {
                         let stop_hint = format!(

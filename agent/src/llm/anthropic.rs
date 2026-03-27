@@ -33,19 +33,19 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    pub fn new(config: &LlmSection) -> Self {
+    pub fn new(config: &LlmSection) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
-            .expect("build reqwest client");
+            .context("build reqwest client")?;
 
-        Self {
+        Ok(Self {
             http,
             api_key: config.api_key.expose_secret().to_string(),
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             temperature: config.temperature,
-        }
+        })
     }
 
     async fn do_chat(

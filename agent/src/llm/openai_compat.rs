@@ -32,15 +32,15 @@ pub struct OpenAiCompatClient {
 }
 
 impl OpenAiCompatClient {
-    pub fn new(config: &LlmSection) -> Self {
+    pub fn new(config: &LlmSection) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
-            .expect("build reqwest client");
+            .context("build reqwest client")?;
 
         let endpoint = build_endpoint(&config.base_url);
 
-        Self {
+        Ok(Self {
             http,
             endpoint,
             api_key: config.api_key.expose_secret().to_string(),
@@ -48,7 +48,7 @@ impl OpenAiCompatClient {
             max_tokens: config.max_tokens,
             temperature: config.temperature,
             supports_tools: config.supports_tools,
-        }
+        })
     }
 
     /// Performs the actual HTTP request with retry logic.

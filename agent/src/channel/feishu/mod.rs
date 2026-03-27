@@ -31,11 +31,11 @@ pub struct FeishuChannel {
 }
 
 impl FeishuChannel {
-    pub fn new(config: &FeishuSection) -> Self {
-        Self {
-            api: Arc::new(api::FeishuApi::new(config)),
+    pub fn new(config: &FeishuSection) -> Result<Self> {
+        Ok(Self {
+            api: Arc::new(api::FeishuApi::new(config)?),
             allow_from: config.allow_from.clone(),
-        }
+        })
     }
 }
 

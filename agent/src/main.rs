@@ -390,7 +390,7 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
     };
 
     if let Some(ref feishu_cfg) = bs.config.feishu {
-        let feishu_channel: Arc<dyn Channel> = Arc::new(FeishuChannel::new(feishu_cfg));
+        let feishu_channel: Arc<dyn Channel> = Arc::new(FeishuChannel::new(feishu_cfg)?);
         channels.push(feishu_channel);
         tracing::info!("feishu channel enabled");
     } else {

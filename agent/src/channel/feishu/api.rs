@@ -40,23 +40,23 @@ struct CachedToken {
 pub struct FeishuApi {
     http: reqwest::Client,
     app_id: String,
-    app_secret: String,
+    app_secret: secrecy::SecretString,
     token: RwLock<Option<CachedToken>>,
 }
 
 impl FeishuApi {
-    pub fn new(config: &FeishuSection) -> Self {
+    pub fn new(config: &FeishuSection) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .expect("build reqwest client");
+            .context("build reqwest client")?;
 
-        Self {
+        Ok(Self {
             http,
             app_id: config.app_id.clone(),
-            app_secret: config.app_secret.expose_secret().to_string(),
+            app_secret: config.app_secret.clone(),
             token: RwLock::new(None),
-        }
+        })
     }
 
     // ── Token Management ─────────────────────────────────────────────────────
@@ -77,7 +77,7 @@ impl FeishuApi {
         let url = format!("{FEISHU_API_BASE}/auth/v3/tenant_access_token/internal");
         let body = serde_json::json!({
             "app_id": self.app_id,
-            "app_secret": self.app_secret,
+            "app_secret": self.app_secret.expose_secret(),
         });
 
         let resp = self.http.post(&url).json(&body).send().await?;
@@ -147,7 +147,7 @@ impl FeishuApi {
             .header("locale", "zh")
             .json(&serde_json::json!({
                 "AppID": self.app_id,
-                "AppSecret": self.app_secret,
+                "AppSecret": self.app_secret.expose_secret(),
             }))
             .send()
             .await?

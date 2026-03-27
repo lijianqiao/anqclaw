@@ -80,6 +80,26 @@ impl Gateway {
             });
         }
 
+        // Monitor queue depth periodically
+        let tx_monitor = tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                let capacity = tx_monitor.capacity();
+                // Channel max capacity is 256; warn when less than 25% remains
+                if capacity < 64 {
+                    tracing::warn!(
+                        remaining_capacity = capacity,
+                        "gateway: message queue pressure — capacity below 25%"
+                    );
+                }
+                if tx_monitor.is_closed() {
+                    break;
+                }
+            }
+        });
+
         // Drop our copy so rx closes when all channel senders are gone
         drop(tx);
 

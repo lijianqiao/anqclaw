@@ -65,9 +65,9 @@ pub trait LlmClient: Send + Sync {
 /// to `OpenAiCompatClient` — the only difference is `base_url` + `api_key` in config.
 pub fn create_llm_client(config: &LlmSection) -> Result<Arc<dyn LlmClient>> {
     let inner: Arc<dyn LlmClient> = match config.provider.as_str() {
-        "anthropic" => Arc::new(anthropic::AnthropicClient::new(config)),
+        "anthropic" => Arc::new(anthropic::AnthropicClient::new(config)?),
         "openai_compat" | "openai" | "deepseek" | "qwen" | "ollama" | "gemini" | "mimo" => {
-            Arc::new(openai_compat::OpenAiCompatClient::new(config))
+            Arc::new(openai_compat::OpenAiCompatClient::new(config)?)
         }
         other => anyhow::bail!(
             "Unknown LLM provider: `{other}`. Supported: anthropic, openai_compat, openai, \

@@ -56,7 +56,44 @@ pub fn collect_secrets(config: &AppConfig) -> Vec<String> {
 /// Redact sensitive information from text.
 ///
 /// Returns the redacted text with secrets replaced by `[REDACTED]`.
+/// If the input is valid JSON, it is parsed, string fields are redacted,
+/// and the result is serialized back to preserve JSON structure.
 pub fn redact_output(text: &str, secrets: &[String], extra_patterns: &[String]) -> String {
+    // If the input is valid JSON, do structured redaction to avoid breaking
+    // JSON syntax (e.g. changing value length inside a quoted string).
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(text) {
+        redact_json_value(&mut value, secrets, extra_patterns);
+        return serde_json::to_string(&value).unwrap_or_else(|_| {
+            // Fallback: do plain-text redaction if re-serialization fails
+            redact_plain(text, secrets, extra_patterns)
+        });
+    }
+
+    redact_plain(text, secrets, extra_patterns)
+}
+
+/// Recursively redact string values inside a JSON Value tree.
+fn redact_json_value(value: &mut serde_json::Value, secrets: &[String], extra_patterns: &[String]) {
+    match value {
+        serde_json::Value::String(s) => {
+            *s = redact_plain(s, secrets, extra_patterns);
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                redact_json_value(item, secrets, extra_patterns);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                redact_json_value(v, secrets, extra_patterns);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Plain-text redaction (original string-replacement approach).
+fn redact_plain(text: &str, secrets: &[String], extra_patterns: &[String]) -> String {
     let mut result = text.to_string();
 
     // 1. Redact known secret values from config
@@ -79,12 +116,7 @@ pub fn redact_output(text: &str, secrets: &[String], extra_patterns: &[String]) 
             let after_prefix = &remaining[pos..];
             let token_end = after_prefix
                 .find(|c: char| {
-                    c.is_whitespace()
-                        || c == '"'
-                        || c == '\''
-                        || c == ','
-                        || c == '}'
-                        || c == ']'
+                    c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}' || c == ']'
                 })
                 .unwrap_or(after_prefix.len());
             redacted.push_str("[REDACTED]");
@@ -148,5 +180,17 @@ mod tests {
         let result = redact_output(text, &[], &["hunter2".to_string()]);
         assert!(result.contains("[REDACTED]"));
         assert!(!result.contains("hunter2"));
+    }
+
+    #[test]
+    fn test_redact_json_preserves_structure() {
+        let json = r#"{"key":"sk-ant-secret123","count":42,"nested":{"token":"ghp_abcdef"}}"#;
+        let result = redact_output(json, &[], &[]);
+        // Must still be valid JSON
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("should be valid JSON");
+        assert_eq!(parsed["count"], 42);
+        assert!(!result.contains("sk-ant-secret123"));
+        assert!(!result.contains("ghp_abcdef"));
     }
 }

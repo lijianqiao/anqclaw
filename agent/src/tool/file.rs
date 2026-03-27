@@ -25,20 +25,42 @@ fn resolve_safe_path(sandbox: &Path, user_path: &str) -> Result<PathBuf> {
     };
 
     // For reads the file must exist so we can canonicalize directly.
-    // For writes the file may not exist yet, so we canonicalize the *parent*.
+    // For writes the file may not exist yet, so we canonicalize the highest
+    // existing ancestor FIRST, verify it's inside the sandbox, then create
+    // directories. This prevents symlink-based sandbox escapes.
     let canonical = if candidate.exists() {
         candidate.canonicalize()?
     } else {
-        let parent = candidate
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("no parent directory for path"))?;
-
-        // Create parent dirs if needed (write scenario)
-        std::fs::create_dir_all(parent)?;
-        let canonical_parent = parent.canonicalize()?;
         let file_name = candidate
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("path has no file name"))?;
+
+        // Walk up to find the highest existing ancestor and canonicalize it.
+        let parent = candidate
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("no parent directory for path"))?;
+        let mut existing_ancestor = parent.to_path_buf();
+        while !existing_ancestor.exists() {
+            existing_ancestor = existing_ancestor
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve ancestor path"))?
+                .to_path_buf();
+        }
+        let canonical_ancestor = existing_ancestor.canonicalize()?;
+
+        // Verify the existing ancestor is inside the sandbox BEFORE creating dirs
+        let sandbox_canonical = sandbox.canonicalize()?;
+        if !canonical_ancestor.starts_with(&sandbox_canonical) {
+            bail!(
+                "path `{}` resolves outside the allowed directory `{}`",
+                candidate.display(),
+                sandbox_canonical.display()
+            );
+        }
+
+        // Now safe to create directories
+        std::fs::create_dir_all(parent)?;
+        let canonical_parent = parent.canonicalize()?;
         canonical_parent.join(file_name)
     };
 

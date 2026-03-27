@@ -120,11 +120,25 @@ impl AuditLogger {
     }
 
     fn write_event(&self, event: &AuditEvent) {
-        if let Ok(json) = serde_json::to_string(event)
-            && let Ok(mut writer) = self.writer.lock()
-        {
-            let _ = writeln!(writer, "{json}");
-            let _ = writer.flush();
+        let json = match serde_json::to_string(event) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!(error = %e, "audit: failed to serialize event");
+                return;
+            }
+        };
+        let mut writer = match self.writer.lock() {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(error = %e, "audit: failed to acquire writer lock");
+                return;
+            }
+        };
+        if let Err(e) = writeln!(writer, "{json}") {
+            tracing::warn!(error = %e, "audit: failed to write event");
+        }
+        if let Err(e) = writer.flush() {
+            tracing::warn!(error = %e, "audit: failed to flush writer");
         }
     }
 }

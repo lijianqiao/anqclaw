@@ -268,9 +268,18 @@ pub fn split_command_chain(command: &str) -> Vec<String> {
             continue;
         }
         if in_double_quote {
-            current.push(c);
-            if c == '"' {
+            if c == '\\' {
+                current.push(c);
+                if let Some(&next) = chars.peek() {
+                    if next == '"' || next == '\\' {
+                        current.push(chars.next().unwrap());
+                    }
+                }
+            } else if c == '"' {
+                current.push(c);
                 in_double_quote = false;
+            } else {
+                current.push(c);
             }
             continue;
         }

@@ -19,14 +19,14 @@ const WORKSPACE_FILES: &[&str] = &["SOUL.md", "AGENTS.md", "TOOLS.md", "USER.md"
 /// 2. Otherwise, try loading workspace files (SOUL.md → AGENTS.md → TOOLS.md →
 ///    USER.md → MEMORY.md) from `config.app.workspace`.
 /// 3. If none exist → fall back to `DEFAULT_SYSTEM_PROMPT`.
-pub fn build_system_prompt(
+pub async fn build_system_prompt(
     config: &AppConfig,
     skill_summary: &str,
     env_probe: &EnvironmentProbe,
 ) -> String {
     // Priority 1: explicit system prompt file
     if !config.agent.system_prompt_file.is_empty() {
-        if let Ok(content) = std::fs::read_to_string(&config.agent.system_prompt_file)
+        if let Ok(content) = tokio::fs::read_to_string(&config.agent.system_prompt_file).await
             && !content.trim().is_empty()
         {
             let mut prompt = content;
@@ -51,7 +51,7 @@ pub fn build_system_prompt(
 
     for filename in WORKSPACE_FILES {
         let path = format!("{}/{}", workspace, filename);
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(content) = tokio::fs::read_to_string(&path).await {
             let trimmed = content.trim();
             if !trimmed.is_empty() {
                 parts.push(format!("# {}\n\n{}", filename, trimmed));
