@@ -16,7 +16,7 @@ const MAX_PDF_SIZE: u64 = 50 * 1024 * 1024;
 pub struct PdfRead {
     sandbox: PathBuf,
     blocked_dirs: Vec<String>,
-    trusted_dirs: Vec<String>,
+    trusted_dirs: Vec<PathBuf>,
     max_chars: usize,
 }
 
@@ -30,14 +30,17 @@ impl PdfRead {
         Self {
             sandbox: PathBuf::from(file_access_dir),
             blocked_dirs,
-            trusted_dirs,
+            trusted_dirs: trusted_dirs
+                .into_iter()
+                .map(|dir| crate::paths::resolve_configured_path(&dir))
+                .filter_map(|dir| crate::paths::canonicalize_for_comparison(&dir).ok())
+                .collect(),
             max_chars: max_chars as usize,
         }
     }
 
     fn is_trusted(&self, path: &Path) -> bool {
-        let s = path.to_string_lossy();
-        self.trusted_dirs.iter().any(|d| s.starts_with(d.as_str()))
+        crate::paths::path_is_trusted(path, &self.trusted_dirs)
     }
 
     async fn do_execute(&self, args: serde_json::Value) -> Result<String> {

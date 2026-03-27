@@ -437,13 +437,12 @@ async fn handle_chat_stream(
     let chat_id_clone = chat_id.clone();
     tokio::spawn(async move {
         let (_, persist_messages) = agent.handle_streaming(&inbound, &history, delta_tx).await;
-        if !persist_messages.is_empty() {
-            if let Err(e) = memory_clone
+        if !persist_messages.is_empty()
+            && let Err(e) = memory_clone
                 .save_conversation(&chat_id_clone, &persist_messages)
                 .await
-            {
-                tracing::error!(error = %e, "failed to save streaming conversation");
-            }
+        {
+            tracing::error!(error = %e, "failed to save streaming conversation");
         }
     });
 

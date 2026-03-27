@@ -119,11 +119,11 @@ impl Scheduler {
 
             for (i, task) in self.tasks.iter().enumerate() {
                 // Find the next fire time after the last fired time
-                if let Some(next) = task.schedule.after(&last_fired[i]).next() {
-                    if next <= now {
-                        last_fired[i] = now;
-                        self.run_task(task).await;
-                    }
+                if let Some(next) = task.schedule.after(&last_fired[i]).next()
+                    && next <= now
+                {
+                    last_fired[i] = now;
+                    self.run_task(task).await;
                 }
             }
         }
@@ -165,14 +165,14 @@ impl Scheduler {
         let (mut reply, conversation) = self.agent.handle(&msg, &history).await;
 
         // Persist conversation
-        if !conversation.is_empty() {
-            if let Err(e) = self.memory.save_conversation(&chat_id, &conversation).await {
-                tracing::error!(
-                    name = %task.config.name,
-                    error = %e,
-                    "scheduler: failed to save conversation"
-                );
-            }
+        if !conversation.is_empty()
+            && let Err(e) = self.memory.save_conversation(&chat_id, &conversation).await
+        {
+            tracing::error!(
+                name = %task.config.name,
+                error = %e,
+                "scheduler: failed to save conversation"
+            );
         }
 
         // "HEARTBEAT_OK" convention — skip notification

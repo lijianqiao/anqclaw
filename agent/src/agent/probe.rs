@@ -64,23 +64,20 @@ impl EnvironmentProbe {
                 .get("python3")
                 .map(|b| b.available)
                 .unwrap_or(false);
-            if !py3_available {
-                if let Some(py) = binaries.get("python") {
-                    if py.available {
-                        if let Some(ref ver) = py.version {
-                            if ver.starts_with("3.") || ver.starts_with("Python 3.") {
-                                binaries.insert(
-                                    "python3".to_string(),
-                                    BinaryInfo {
-                                        available: true,
-                                        version: py.version.clone(),
-                                        path: py.path.clone(),
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
+            if !py3_available
+                && let Some(py) = binaries.get("python")
+                && py.available
+                && let Some(ref ver) = py.version
+                && (ver.starts_with("3.") || ver.starts_with("Python 3."))
+            {
+                binaries.insert(
+                    "python3".to_string(),
+                    BinaryInfo {
+                        available: true,
+                        version: py.version.clone(),
+                        path: py.path.clone(),
+                    },
+                );
             }
         }
 

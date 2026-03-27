@@ -307,7 +307,7 @@ mod tests {
         writeln!(f, "description: Expert code reviewer").unwrap();
         writeln!(f, "trigger: code review, CR, review").unwrap();
         writeln!(f, "---").unwrap();
-        writeln!(f, "").unwrap();
+        writeln!(f).unwrap();
         writeln!(f, "You are a code review expert.").unwrap();
 
         let meta = parse_frontmatter(&skill_path).unwrap().unwrap();

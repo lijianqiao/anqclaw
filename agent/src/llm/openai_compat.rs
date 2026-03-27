@@ -202,11 +202,11 @@ impl OpenAiCompatClient {
                     };
 
                     if let Some(choice) = chunk.choices.first() {
-                        if let Some(ref content) = choice.delta.content {
-                            if !content.is_empty() {
-                                full_text.push_str(content);
-                                let _ = tx.send(StreamEvent::Delta(content.clone())).await;
-                            }
+                        if let Some(ref content) = choice.delta.content
+                            && !content.is_empty()
+                        {
+                            full_text.push_str(content);
+                            let _ = tx.send(StreamEvent::Delta(content.clone())).await;
                         }
                         if let Some(ref tcs) = choice.delta.tool_calls {
                             for tc in tcs {

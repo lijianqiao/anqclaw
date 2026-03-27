@@ -51,7 +51,7 @@ pub struct Memory {
 ///
 /// Provides:
 /// - Conversation history CRUD (messages table)
-/// - Long-term memory save + FTS5 full-text search (memories virtual table)
+/// - Long-term memory save + FTS5 full-text search (source table + index mirror)
 ///
 /// TODO(future): When splitting into a workspace crate, extract this into
 /// `crates/memory/` and expose it via an async trait so other crates
@@ -93,7 +93,96 @@ impl MemoryStore {
             .await
             .context("execute schema.sql")?;
 
-        Ok(Self { pool })
+        let store = Self { pool };
+        store.initialise_memories().await?;
+        Ok(store)
+    }
+
+    async fn initialise_memories(&self) -> Result<()> {
+        self.migrate_legacy_memories().await?;
+        self.rebuild_memory_index_if_needed().await?;
+        Ok(())
+    }
+
+    async fn table_exists(&self, table_name: &str) -> Result<bool> {
+        let row = sqlx::query(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ? LIMIT 1",
+        )
+        .bind(table_name)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("check table exists: {table_name}"))?;
+        Ok(row.is_some())
+    }
+
+    async fn count_rows(&self, table_name: &str) -> Result<i64> {
+        let sql = format!("SELECT COUNT(*) AS count FROM {table_name}");
+        let row = sqlx::query(&sql)
+            .fetch_one(&self.pool)
+            .await
+            .with_context(|| format!("count rows in {table_name}"))?;
+        Ok(row.get::<i64, _>("count"))
+    }
+
+    async fn migrate_legacy_memories(&self) -> Result<()> {
+        if !self.table_exists("memories").await? {
+            return Ok(());
+        }
+        if self.count_rows("memories_data").await? > 0 {
+            return Ok(());
+        }
+
+        let rows = sqlx::query("SELECT key, content, tags, created_at FROM memories")
+            .fetch_all(&self.pool)
+            .await
+            .context("load legacy memories from FTS table")?;
+
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin legacy memory migration")?;
+        for row in rows {
+            sqlx::query(
+                r#"
+                INSERT INTO memories_data (key, content, tags, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    content = excluded.content,
+                    tags = excluded.tags,
+                    created_at = excluded.created_at
+                "#,
+            )
+            .bind(row.get::<String, _>("key"))
+            .bind(row.get::<String, _>("content"))
+            .bind(row.get::<String, _>("tags"))
+            .bind(row.get::<i64, _>("created_at"))
+            .execute(&mut *tx)
+            .await
+            .context("migrate legacy memory row")?;
+        }
+        tx.commit()
+            .await
+            .context("commit legacy memory migration")?;
+        Ok(())
+    }
+
+    async fn rebuild_memory_index_if_needed(&self) -> Result<()> {
+        let data_rows = self.count_rows("memories_data").await?;
+        let fts_rows = self.count_rows("memories_fts").await?;
+        if data_rows == 0 || data_rows == fts_rows {
+            return Ok(());
+        }
+
+        sqlx::query("INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')")
+            .execute(&self.pool)
+            .await
+            .context("rebuild memories_fts index")?;
+        Ok(())
     }
 
     // ── Conversation History ──────────────────────────────────────────────────
@@ -182,36 +271,34 @@ impl MemoryStore {
 
     // ── Long-term Memory ──────────────────────────────────────────────────────
 
-    /// Saves a memory entry. If a memory with the same `key` already exists it
-    /// is replaced (DELETE + INSERT) to keep keys unique.
+    /// Saves a memory entry into the source table; the FTS index is kept in
+    /// sync by SQLite triggers.
     pub async fn save_memory(&self, key: &str, content: &str, tags: &[String]) -> Result<()> {
         let tags_str = tags.join(",");
         let created_at = chrono::Utc::now().timestamp();
 
-        let mut tx = self.pool.begin().await.context("begin transaction")?;
-
-        // Remove existing entry with the same key so the key stays unique.
-        sqlx::query("DELETE FROM memories WHERE key = ?")
-            .bind(key)
-            .execute(&mut *tx)
-            .await
-            .context("delete old memory")?;
-
         sqlx::query(
-            "INSERT INTO memories (key, content, tags, created_at) VALUES (?, ?, ?, ?)",
+            r#"
+            INSERT INTO memories_data (key, content, tags, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                content = excluded.content,
+                tags = excluded.tags,
+                created_at = excluded.created_at
+            "#,
         )
         .bind(key)
         .bind(content)
         .bind(&tags_str)
         .bind(created_at)
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await
         .context("insert memory")?;
 
-        tx.commit().await.context("commit transaction")
+        Ok(())
     }
 
-    /// Full-text searches the `memories` table using FTS5 MATCH syntax.
+    /// Full-text searches the memory index using FTS5 MATCH syntax.
     ///
     /// Uses the `trigram` tokenizer: queries must be **≥ 3 characters** to produce
     /// a valid trigram. Shorter queries will return an empty result.
@@ -222,10 +309,11 @@ impl MemoryStore {
         let escaped = escape_fts5_query(query);
         let rows = sqlx::query(
             r#"
-            SELECT key, content, tags, created_at
-            FROM memories
-            WHERE memories MATCH ?
-            ORDER BY rank
+            SELECT d.key, d.content, d.tags, d.created_at
+            FROM memories_fts
+            JOIN memories_data d ON d.id = memories_fts.rowid
+            WHERE memories_fts MATCH ?
+            ORDER BY bm25(memories_fts)
             LIMIT ?
             "#,
         )
@@ -343,10 +431,7 @@ impl MemoryStore {
         let mut tx = self.pool.begin().await.context("begin transaction")?;
 
         for msg in &export.messages {
-            let tool_calls_str = msg
-                .tool_calls
-                .as_ref()
-                .map(|v| v.to_string());
+            let tool_calls_str = msg.tool_calls.as_ref().map(|v| v.to_string());
 
             sqlx::query(
                 r#"
@@ -418,9 +503,12 @@ fn escape_fts5_query(query: &str) -> String {
 mod tests {
     use super::*;
     use crate::types::{ChatMessage, ToolCall};
+    use std::sync::Arc;
 
     async fn in_memory_store() -> MemoryStore {
-        MemoryStore::new(":memory:").await.expect("open :memory: db")
+        MemoryStore::new(":memory:")
+            .await
+            .expect("open :memory: db")
     }
 
     // ── History tests ─────────────────────────────────────────────────────────
@@ -442,10 +530,7 @@ mod tests {
             .expect("save_conversation");
 
         // Fetch only the most recent 2
-        let history = store
-            .get_history(chat_id, 2)
-            .await
-            .expect("get_history");
+        let history = store.get_history(chat_id, 2).await.expect("get_history");
 
         assert_eq!(history.len(), 2);
         // Oldest-first order: index 0 should be the second message saved
@@ -466,7 +551,7 @@ mod tests {
 
         let messages = vec![
             ChatMessage::user("现在几点？"),
-            ChatMessage::assistant_with_tools(None, &[tool_call.clone()]),
+            ChatMessage::assistant_with_tools(None, std::slice::from_ref(&tool_call)),
             ChatMessage::tool_result(&crate::types::ToolResult {
                 call_id: "call_abc".to_string(),
                 output: "Mon Mar 24 12:00:00 UTC 2026".to_string(),
@@ -480,17 +565,17 @@ mod tests {
             .await
             .expect("save_conversation with tool calls");
 
-        let history = store
-            .get_history(chat_id, 10)
-            .await
-            .expect("get_history");
+        let history = store.get_history(chat_id, 10).await.expect("get_history");
 
         assert_eq!(history.len(), 4);
 
         // Verify tool_calls round-trip
         let assistant_msg = &history[1];
         assert_eq!(assistant_msg.role, Role::Assistant);
-        let calls = assistant_msg.tool_calls.as_ref().expect("tool_calls present");
+        let calls = assistant_msg
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls present");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_abc");
 
@@ -543,7 +628,10 @@ mod tests {
             .await
             .expect("search_memory");
 
-        assert!(!results.is_empty(), "should find memories matching '中文回复'");
+        assert!(
+            !results.is_empty(),
+            "should find memories matching '中文回复'"
+        );
         assert!(
             results.iter().any(|m| m.key == "user_preference_language"),
             "should include language preference"
@@ -570,7 +658,65 @@ mod tests {
             .expect("search after upsert");
 
         assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "my_key");
         assert_eq!(results[0].content, "updated content");
+
+        let row = sqlx::query("SELECT COUNT(*) AS count FROM memories_data WHERE key = ?")
+            .bind("my_key")
+            .fetch_one(&store.pool)
+            .await
+            .expect("count source rows");
+        assert_eq!(row.get::<i64, _>("count"), 1);
+    }
+
+    #[tokio::test]
+    async fn test_save_memory_concurrent_same_key_keeps_single_source_row() {
+        let db_path = std::env::temp_dir().join(format!(
+            "anqclaw-memory-concurrent-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db_path_str = db_path.to_string_lossy().into_owned();
+        let store = Arc::new(MemoryStore::new(&db_path_str).await.expect("open file db"));
+
+        let mut handles = Vec::new();
+        for idx in 0..8 {
+            let store = store.clone();
+            handles.push(tokio::spawn(async move {
+                let content = format!("value_{idx}_shared");
+                store
+                    .save_memory("shared_key", &content, &[])
+                    .await
+                    .expect("concurrent save_memory");
+            }));
+        }
+
+        for handle in handles {
+            handle.await.expect("join concurrent save");
+        }
+
+        let count_row = sqlx::query("SELECT COUNT(*) AS count FROM memories_data WHERE key = ?")
+            .bind("shared_key")
+            .fetch_one(&store.pool)
+            .await
+            .expect("count shared key rows");
+        assert_eq!(count_row.get::<i64, _>("count"), 1);
+
+        let content_row = sqlx::query("SELECT content FROM memories_data WHERE key = ?")
+            .bind("shared_key")
+            .fetch_one(&store.pool)
+            .await
+            .expect("fetch final shared key row");
+        let final_content: String = content_row.get("content");
+
+        let results = store
+            .search_memory(&final_content, 5)
+            .await
+            .expect("search final shared content");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "shared_key");
+
+        store.close().await;
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]

@@ -24,7 +24,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 
     // English: ~4 chars per token; CJK: ~1.5 chars per token
     let ascii_tokens = ascii_chars / 4;
-    let cjk_tokens = (cjk_chars * 3 + 1) / 2; // ceil(cjk * 1.5)
+    let cjk_tokens = (cjk_chars * 3).div_ceil(2); // ceil(cjk * 1.5)
     ascii_tokens + cjk_tokens + 1 // +1 for safety margin
 }
 

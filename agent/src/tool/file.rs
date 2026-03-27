@@ -4,7 +4,7 @@
 //! Paths are canonicalised and must start with the sandbox prefix; otherwise
 //! the operation is rejected to prevent path-traversal attacks.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -201,15 +201,23 @@ fn detect_binary_format(bytes: &[u8]) -> Option<&'static str> {
 pub struct FileRead {
     sandbox: PathBuf,
     blocked_dirs: Vec<String>,
-    trusted_dirs: Vec<String>,
+    trusted_dirs: Vec<PathBuf>,
 }
 
 impl FileRead {
-    pub fn new(file_access_dir: &str, blocked_dirs: Vec<String>, trusted_dirs: Vec<String>) -> Self {
+    pub fn new(
+        file_access_dir: &str,
+        blocked_dirs: Vec<String>,
+        trusted_dirs: Vec<String>,
+    ) -> Self {
         Self {
             sandbox: PathBuf::from(file_access_dir),
             blocked_dirs,
-            trusted_dirs,
+            trusted_dirs: trusted_dirs
+                .into_iter()
+                .map(|dir| crate::paths::resolve_configured_path(&dir))
+                .filter_map(|dir| crate::paths::canonicalize_for_comparison(&dir).ok())
+                .collect(),
         }
     }
 
@@ -219,8 +227,7 @@ impl FileRead {
     const LOSSY_MAX_CHARS: usize = 2000;
 
     fn is_trusted(&self, path: &Path) -> bool {
-        let s = path.to_string_lossy();
-        self.trusted_dirs.iter().any(|d| s.starts_with(d.as_str()))
+        crate::paths::path_is_trusted(path, &self.trusted_dirs)
     }
 
     async fn do_execute(&self, args: serde_json::Value) -> Result<String> {
@@ -270,7 +277,7 @@ impl FileRead {
 
         // Step 2: Try UTF-8 conversion (zero-copy if valid)
         match String::from_utf8(bytes) {
-            Ok(content) => return Ok(content),
+            Ok(content) => Ok(content),
             Err(e) => {
                 // Reclaim the bytes for binary detection
                 let bytes = e.into_bytes();
@@ -355,21 +362,28 @@ impl Tool for FileRead {
 pub struct FileWrite {
     sandbox: PathBuf,
     blocked_dirs: Vec<String>,
-    trusted_dirs: Vec<String>,
+    trusted_dirs: Vec<PathBuf>,
 }
 
 impl FileWrite {
-    pub fn new(file_access_dir: &str, blocked_dirs: Vec<String>, trusted_dirs: Vec<String>) -> Self {
+    pub fn new(
+        file_access_dir: &str,
+        blocked_dirs: Vec<String>,
+        trusted_dirs: Vec<String>,
+    ) -> Self {
         Self {
             sandbox: PathBuf::from(file_access_dir),
             blocked_dirs,
-            trusted_dirs,
+            trusted_dirs: trusted_dirs
+                .into_iter()
+                .map(|dir| crate::paths::resolve_configured_path(&dir))
+                .filter_map(|dir| crate::paths::canonicalize_for_comparison(&dir).ok())
+                .collect(),
         }
     }
 
     fn is_trusted(&self, path: &Path) -> bool {
-        let s = path.to_string_lossy();
-        self.trusted_dirs.iter().any(|d| s.starts_with(d.as_str()))
+        crate::paths::path_is_trusted(path, &self.trusted_dirs)
     }
 
     async fn do_execute(&self, args: serde_json::Value) -> Result<String> {
@@ -407,7 +421,11 @@ impl FileWrite {
             .await
             .map_err(|e| anyhow::anyhow!("write `{}`: {e}", path.display()))?;
 
-        Ok(format!("Written {} bytes to {}", content.len(), path.display()))
+        Ok(format!(
+            "Written {} bytes to {}",
+            content.len(),
+            path.display()
+        ))
     }
 }
 
@@ -545,6 +563,27 @@ mod tests {
 
         assert!(dir.join("script").join("stats_devices.py").exists());
         assert!(!dir.join("workspace").join("stats_devices.py").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_trusted_dir_requires_real_path_boundary() {
+        let dir = std::env::temp_dir().join("anqclaw_test_trusted_boundary");
+        let trusted = dir.join("trusted");
+        let sibling = dir.join("trusted-other");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&trusted).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        let reader = FileRead::new(
+            dir.to_str().unwrap(),
+            vec![],
+            vec![trusted.to_string_lossy().to_string()],
+        );
+
+        assert!(reader.is_trusted(&trusted.join("ok.txt")));
+        assert!(!reader.is_trusted(&sibling.join("not-ok.txt")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

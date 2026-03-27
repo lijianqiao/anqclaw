@@ -36,6 +36,63 @@ pub fn resolve_path(base: &Path, relative: &str) -> PathBuf {
     }
 }
 
+/// Resolves a configured path relative to `~/.anqclaw/` and supports `~/...`.
+pub fn resolve_configured_path(relative: &str) -> PathBuf {
+    if relative == "~" {
+        return dirs::home_dir().expect("cannot determine home directory");
+    }
+    if let Some(rest) = relative
+        .strip_prefix("~/")
+        .or_else(|| relative.strip_prefix("~\\"))
+    {
+        return dirs::home_dir()
+            .expect("cannot determine home directory")
+            .join(rest);
+    }
+
+    resolve_path(&anqclaw_home(), relative)
+}
+
+/// Canonicalizes an existing path, or its highest existing ancestor plus the remaining suffix.
+pub fn canonicalize_for_comparison(path: &Path) -> std::io::Result<PathBuf> {
+    if path.exists() {
+        return path.canonicalize();
+    }
+
+    let mut current = path.to_path_buf();
+    let mut suffix = Vec::new();
+
+    while !current.exists() {
+        if let Some(name) = current.file_name() {
+            suffix.push(PathBuf::from(name));
+        }
+        current = current
+            .parent()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("cannot resolve existing ancestor for {}", path.display()),
+                )
+            })?
+            .to_path_buf();
+    }
+
+    let mut canonical = current.canonicalize()?;
+    for component in suffix.iter().rev() {
+        canonical.push(component);
+    }
+    Ok(canonical)
+}
+
+/// Returns true if `path` resolves within any configured trusted root.
+pub fn path_is_trusted(path: &Path, trusted_roots: &[PathBuf]) -> bool {
+    let Ok(candidate) = canonicalize_for_comparison(path) else {
+        return false;
+    };
+
+    trusted_roots.iter().any(|root| candidate.starts_with(root))
+}
+
 /// Ensures the standard subdirectory structure exists under `home`.
 ///
 /// Creates: workspace/, data/, sessions/, skills/, logs/
@@ -110,12 +167,22 @@ mod tests {
     fn test_resolve_path_relative() {
         let base = Path::new("/home/user/.anqclaw");
         let resolved = resolve_path(base, "data/memory.db");
-        assert_eq!(resolved, PathBuf::from("/home/user/.anqclaw/data/memory.db"));
+        assert_eq!(
+            resolved,
+            PathBuf::from("/home/user/.anqclaw/data/memory.db")
+        );
     }
 
     #[test]
     fn test_anqclaw_home_not_empty() {
         let home = anqclaw_home();
         assert!(home.ends_with(".anqclaw"));
+    }
+
+    #[test]
+    fn test_resolve_configured_path_tilde() {
+        let resolved = resolve_configured_path("~/projects");
+        assert!(resolved.is_absolute());
+        assert!(resolved.ends_with("projects"));
     }
 }

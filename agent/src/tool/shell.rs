@@ -71,7 +71,7 @@ pub struct ShellExec {
     /// Directories blocked from any path arguments
     blocked_dirs: Vec<String>,
     /// Directories where Full permission applies regardless of base level
-    trusted_dirs: Vec<String>,
+    trusted_dirs: Vec<PathBuf>,
     timeout: Duration,
     working_dir: Option<PathBuf>,
     /// Venv isolation: when set, pip/uv install commands are rewritten to run
@@ -81,6 +81,7 @@ pub struct ShellExec {
 }
 
 impl ShellExec {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         permission_level: &str,
         legacy_allowed_commands: &[String],
@@ -143,7 +144,11 @@ impl ShellExec {
             allowed,
             blocked,
             blocked_dirs,
-            trusted_dirs,
+            trusted_dirs: trusted_dirs
+                .into_iter()
+                .map(|dir| crate::paths::resolve_configured_path(&dir))
+                .filter_map(|dir| crate::paths::canonicalize_for_comparison(&dir).ok())
+                .collect(),
             timeout: Duration::from_secs(timeout_secs as u64),
             working_dir,
             venv_path,
@@ -187,6 +192,102 @@ impl ShellExec {
         ]
         .iter()
         .any(|prefix| trimmed == *prefix || trimmed.starts_with(&format!("{prefix} ")))
+    }
+
+    fn tokenize_command_segment(command: &str) -> Result<Vec<String>> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut chars = command.chars().peekable();
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+
+        while let Some(c) = chars.next() {
+            if in_single_quote {
+                if c == '\'' {
+                    in_single_quote = false;
+                } else {
+                    current.push(c);
+                }
+                continue;
+            }
+
+            if in_double_quote {
+                if c == '\\' {
+                    if let Some(&next) = chars.peek() {
+                        if next == '"' || next == '\\' {
+                            current.push(chars.next().unwrap());
+                        } else {
+                            current.push(c);
+                        }
+                    } else {
+                        current.push(c);
+                    }
+                } else if c == '"' {
+                    in_double_quote = false;
+                } else {
+                    current.push(c);
+                }
+                continue;
+            }
+
+            match c {
+                '\'' => in_single_quote = true,
+                '"' => in_double_quote = true,
+                c if c.is_whitespace() => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(c),
+            }
+        }
+
+        if in_single_quote || in_double_quote {
+            bail!("unclosed quote in command")
+        }
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+        if tokens.is_empty() {
+            bail!("empty command")
+        }
+        Ok(tokens)
+    }
+
+    fn token_candidate_path(&self, token: &str) -> Option<PathBuf> {
+        if token.is_empty() || token.starts_with('-') || token.contains('=') {
+            return None;
+        }
+
+        let looks_like_path = token.starts_with('.')
+            || token.starts_with('/')
+            || token.starts_with("\\\\")
+            || token.contains('/')
+            || token.contains('\\')
+            || Path::new(token).is_absolute();
+        if !looks_like_path {
+            return None;
+        }
+
+        let path = Path::new(token);
+        Some(if path.is_absolute() {
+            path.to_path_buf()
+        } else if let Some(dir) = &self.working_dir {
+            dir.join(path)
+        } else {
+            crate::paths::anqclaw_home().join(path)
+        })
+    }
+
+    fn segment_uses_trusted_dir(&self, segment: &str) -> bool {
+        let Ok(tokens) = Self::tokenize_command_segment(segment) else {
+            return false;
+        };
+
+        tokens
+            .iter()
+            .filter_map(|token| self.token_candidate_path(token))
+            .any(|candidate| crate::paths::path_is_trusted(&candidate, &self.trusted_dirs))
     }
 
     fn decode_command_output(bytes: &[u8]) -> String {
@@ -258,10 +359,10 @@ impl ShellExec {
             }
             if in_double_quote {
                 if c == '\\' {
-                    if let Some(&next) = chars.peek() {
-                        if next == '"' || next == '\\' {
-                            chars.next();
-                        }
+                    if let Some(&next) = chars.peek()
+                        && (next == '"' || next == '\\')
+                    {
+                        chars.next();
                     }
                     continue;
                 }
@@ -284,66 +385,7 @@ impl ShellExec {
 
     #[cfg(target_os = "windows")]
     fn tokenize_simple_command(command: &str) -> Result<Vec<String>> {
-        let mut tokens = Vec::new();
-        let mut current = String::new();
-        let mut chars = command.chars().peekable();
-        let mut in_single_quote = false;
-        let mut in_double_quote = false;
-
-        while let Some(c) = chars.next() {
-            if in_single_quote {
-                if c == '\'' {
-                    in_single_quote = false;
-                } else {
-                    current.push(c);
-                }
-                continue;
-            }
-
-            if in_double_quote {
-                if c == '\\' {
-                    if let Some(&next) = chars.peek() {
-                        if next == '"' || next == '\\' {
-                            current.push(chars.next().unwrap());
-                        } else {
-                            current.push(c);
-                        }
-                    } else {
-                        current.push(c);
-                    }
-                } else if c == '"' {
-                    in_double_quote = false;
-                } else {
-                    current.push(c);
-                }
-                continue;
-            }
-
-            match c {
-                '\'' => in_single_quote = true,
-                '"' => in_double_quote = true,
-                c if c.is_whitespace() => {
-                    if !current.is_empty() {
-                        tokens.push(std::mem::take(&mut current));
-                    }
-                }
-                _ => current.push(c),
-            }
-        }
-
-        if in_single_quote || in_double_quote {
-            bail!("unclosed quote in command")
-        }
-
-        if !current.is_empty() {
-            tokens.push(current);
-        }
-
-        if tokens.is_empty() {
-            bail!("empty command")
-        }
-
-        Ok(tokens)
+        Self::tokenize_command_segment(command)
     }
 
     #[cfg(target_os = "windows")]
@@ -394,11 +436,7 @@ impl ShellExec {
             }
 
             // Permission check — per-segment, not whole command
-            let in_trusted = !self.trusted_dirs.is_empty()
-                && self
-                    .trusted_dirs
-                    .iter()
-                    .any(|d| segment.contains(d.as_str()));
+            let in_trusted = !self.trusted_dirs.is_empty() && self.segment_uses_trusted_dir(segment);
 
             match self.permission_level {
                 PermissionLevel::Readonly | PermissionLevel::Supervised => {
@@ -883,10 +921,10 @@ pub fn split_command_chain(command: &str) -> Vec<String> {
         if in_double_quote {
             if c == '\\' {
                 current.push(c);
-                if let Some(&next) = chars.peek() {
-                    if next == '"' || next == '\\' {
-                        current.push(chars.next().unwrap());
-                    }
+                if let Some(&next) = chars.peek()
+                    && (next == '"' || next == '\\')
+                {
+                    current.push(chars.next().unwrap());
                 }
             } else if c == '"' {
                 current.push(c);
@@ -1173,6 +1211,34 @@ mod tests {
         assert!(shell.check_command_chain("python script.py").is_ok());
         assert!(shell.check_command_chain("pip install pandas").is_ok());
         assert!(shell.check_command_chain("uv pip install openpyxl").is_ok());
+    }
+
+    #[test]
+    fn test_segment_uses_trusted_dir_requires_path_boundary() {
+        let dir = std::env::temp_dir().join("anqclaw_test_shell_trusted_boundary");
+        let trusted = dir.join("trusted");
+        let sibling = dir.join("trusted-other");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&trusted).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        let shell = ShellExec::new(
+            "supervised",
+            &["cat".to_string()],
+            &[],
+            &[],
+            vec![],
+            vec![trusted.to_string_lossy().to_string()],
+            5,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        );
+
+        assert!(shell.segment_uses_trusted_dir(&format!("cat {}", trusted.join("a.txt").display())));
+        assert!(!shell.segment_uses_trusted_dir(&format!("cat {}", sibling.join("a.txt").display())));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(target_os = "windows")]

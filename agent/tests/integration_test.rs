@@ -1,7 +1,7 @@
-//! Integration tests �?Agent + Memory + Tools end-to-end.
+//! Integration tests — Agent + Memory + Tools end-to-end.
 //!
 //! Uses a mock LlmClient to test the complete chain:
-//! InboundMessage �?AgentCore �?ToolRegistry �?MemoryStore �?OutboundMessage
+//! InboundMessage → AgentCore → ToolRegistry → MemoryStore → OutboundMessage
 
 use std::future::Future;
 use std::pin::Pin;
@@ -96,7 +96,7 @@ fn test_inbound(text: &str) -> InboundMessage {
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
-/// Test: pure text reply �?no tool calls
+/// Test: pure text reply → no tool calls
 #[tokio::test]
 async fn test_pure_text_reply() {
     let config = test_config();
@@ -128,7 +128,7 @@ async fn test_pure_text_reply() {
     assert_eq!(persist.len(), 2);
 }
 
-/// Test: tool calling loop �?LLM requests tool, sees result, replies
+/// Test: tool calling loop → LLM requests tool, sees result, replies
 #[tokio::test]
 async fn test_tool_call_and_reply() {
     let config = test_config();
@@ -318,7 +318,7 @@ max_tool_rounds = 2
     let config = Arc::new(AppConfig::load_from_str(toml_str).unwrap());
     let memory = Arc::new(MemoryStore::new(":memory:").await.unwrap());
 
-    // Always returns tool calls �?never text
+    // Always returns tool calls → never text
     let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
         text: None,
         tool_calls: vec![ToolCall {

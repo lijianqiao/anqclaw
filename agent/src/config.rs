@@ -572,8 +572,13 @@ pub struct ToolsSection {
 /// A custom tool that executes an external command.
 #[derive(Debug, Deserialize, Clone)]
 pub struct CustomToolConfig {
+    #[serde(default)]
+    pub executable: String,
+    #[serde(default)]
+    pub base_args: Vec<String>,
     pub name: String,
     pub description: String,
+    #[serde(default)]
     pub command: String,
     #[serde(default = "default_custom_tool_timeout")]
     pub timeout_secs: u32,

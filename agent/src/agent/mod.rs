@@ -229,21 +229,23 @@ impl AgentCore {
             let llm_start = std::time::Instant::now();
             let response = if stream_tx.is_some() {
                 // Streaming path: use chat_stream, forward deltas
-                let mut rx = match current_llm.chat_stream(&messages, &tool_defs).await {
+                let mut rx = match current_llm.chat_stream(&messages, tool_defs).await {
                     Ok(rx) => rx,
                     Err(e) => {
                         if let Some(ref fallback) = current_fallback {
                             tracing::warn!(error = %e, "primary LLM failed, trying fallback (stream)");
-                            fallback.chat_stream(&messages, &tool_defs).await?
+                            fallback.chat_stream(&messages, tool_defs).await?
                         } else {
                             return Err(e);
                         }
                     }
                 };
+                let mut partial_text = String::new();
                 let mut final_resp = None;
                 while let Some(event) = rx.recv().await {
                     match event {
                         StreamEvent::Delta(text) => {
+                            partial_text.push_str(&text);
                             if let Some(ref tx) = stream_tx {
                                 let _ = tx.send(text).await;
                             }
@@ -253,15 +255,30 @@ impl AgentCore {
                         }
                     }
                 }
-                final_resp.ok_or_else(|| anyhow::anyhow!("stream ended without Done event"))?
+                match final_resp {
+                    Some(resp) => resp,
+                    None if !partial_text.is_empty() => {
+                        tracing::warn!(
+                            chars = partial_text.chars().count(),
+                            "stream ended without Done event, returning partial text"
+                        );
+                        crate::types::LlmResponse {
+                            text: Some(partial_text),
+                            tool_calls: vec![],
+                        }
+                    }
+                    None => {
+                        return Err(anyhow::anyhow!("stream ended without Done event"));
+                    }
+                }
             } else {
                 // Non-streaming path (original)
-                match current_llm.chat(&messages, &tool_defs).await {
+                match current_llm.chat(&messages, tool_defs).await {
                     Ok(r) => r,
                     Err(e) => {
                         if let Some(ref fallback) = current_fallback {
                             tracing::warn!(error = %e, "primary LLM failed, trying fallback");
-                            fallback.chat(&messages, &tool_defs).await?
+                            fallback.chat(&messages, tool_defs).await?
                         } else {
                             return Err(e);
                         }
@@ -340,7 +357,7 @@ impl AgentCore {
                             // If redaction broke JSON structure, store as a plain string value
                             // rather than falling back to the unredacted original
                             serde_json::from_str(&redacted)
-                                .unwrap_or_else(|_| serde_json::Value::String(redacted))
+                                .unwrap_or(serde_json::Value::String(redacted))
                         } else {
                             call.arguments.clone()
                         };
@@ -520,6 +537,7 @@ mod tests {
     /// A mock LLM client that returns responses from a pre-defined sequence.
     struct MockLlm {
         responses: Vec<LlmResponse>,
+        stream_events: Option<Vec<StreamEvent>>,
         call_count: AtomicU32,
     }
 
@@ -527,6 +545,15 @@ mod tests {
         fn new(responses: Vec<LlmResponse>) -> Self {
             Self {
                 responses,
+                stream_events: None,
+                call_count: AtomicU32::new(0),
+            }
+        }
+
+        fn with_stream(events: Vec<StreamEvent>) -> Self {
+            Self {
+                responses: vec![],
+                stream_events: Some(events),
                 call_count: AtomicU32::new(0),
             }
         }
@@ -545,6 +572,33 @@ mod tests {
                 } else {
                     // Repeat last response (for max-rounds test)
                     Ok(self.responses.last().unwrap().clone())
+                }
+            })
+        }
+
+        fn chat_stream<'a>(
+            &'a self,
+            _messages: &'a [ChatMessage],
+            _tools: &'a [ToolDefinition],
+        ) -> Pin<Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>> {
+            Box::pin(async move {
+                if let Some(events) = &self.stream_events {
+                    let (tx, rx) = tokio::sync::mpsc::channel(events.len().max(1));
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        for event in events {
+                            let _ = tx.send(event).await;
+                        }
+                    });
+                    Ok(rx)
+                } else {
+                    let resp = self.chat(&[], &[]).await?;
+                    let (tx, rx) = tokio::sync::mpsc::channel(2);
+                    if let Some(ref text) = resp.text {
+                        let _ = tx.send(StreamEvent::Delta(text.clone())).await;
+                    }
+                    let _ = tx.send(StreamEvent::Done(resp)).await;
+                    Ok(rx)
                 }
             })
         }
@@ -619,6 +673,34 @@ max_tool_rounds = 3
         assert_eq!(reply.content, "你好！有什么可以帮你的？");
         assert_eq!(reply.channel, "test");
         // persist should contain: user msg + assistant msg
+        assert_eq!(persist.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_returns_partial_text_without_done() {
+        let memory = test_memory().await;
+        let config = test_config();
+
+        let mock_llm = Arc::new(MockLlm::with_stream(vec![StreamEvent::Delta(
+            "处理中断前的部分回复".into(),
+        )]));
+
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            None,
+            vec![],
+            None,
+        ));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let (reply, persist) = agent.handle_streaming(&test_inbound(), &[], tx).await;
+
+        assert_eq!(reply.content, "处理中断前的部分回复");
+        assert_eq!(rx.recv().await.as_deref(), Some("处理中断前的部分回复"));
         assert_eq!(persist.len(), 2);
     }
 

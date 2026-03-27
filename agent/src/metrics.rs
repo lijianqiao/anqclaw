@@ -48,6 +48,12 @@ impl Metrics {
     }
 }
 
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Serialize)]
 pub struct MetricsSnapshot {
     pub total_requests: u64,

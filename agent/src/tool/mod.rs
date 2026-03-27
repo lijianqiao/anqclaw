@@ -134,12 +134,12 @@ impl ToolRegistry {
         }
 
         // Register activate_skill tool if skills are available
-        if let Some(registry) = skill_registry {
-            if !registry.list().is_empty() {
-                let max_active = skills_config.map(|s| s.max_active_skills).unwrap_or(3);
-                let t = skill_tool::ActivateSkill::new(registry, max_active);
-                tools.insert(t.name().to_string(), Arc::new(t));
-            }
+        if let Some(registry) = skill_registry
+            && !registry.list().is_empty()
+        {
+            let max_active = skills_config.map(|s| s.max_active_skills).unwrap_or(3);
+            let t = skill_tool::ActivateSkill::new(registry, max_active);
+            tools.insert(t.name().to_string(), Arc::new(t));
         }
         // Register switch_model tool if multiple LLM profiles are configured
         if llm_profile_names.len() > 1 {
@@ -148,8 +148,18 @@ impl ToolRegistry {
         }
         // Register custom tools from config
         for custom_config in &config.custom {
-            let t = custom::CustomTool::new(custom_config);
-            tools.insert(t.name().to_string(), Arc::new(t));
+            match custom::CustomTool::new(
+                custom_config,
+                &config.file_access_dir,
+                all_blocked_dirs.clone(),
+            ) {
+                Ok(t) => {
+                    tools.insert(t.name().to_string(), Arc::new(t));
+                }
+                Err(error) => {
+                    tracing::warn!(tool = custom_config.name.as_str(), error = %error, "skipping invalid custom tool configuration");
+                }
+            }
         }
 
         // Register pdf_read tool

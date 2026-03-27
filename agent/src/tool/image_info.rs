@@ -18,7 +18,7 @@ const MAX_BASE64_SIZE: u64 = 1_048_576;
 pub struct ImageInfo {
     sandbox: PathBuf,
     blocked_dirs: Vec<String>,
-    trusted_dirs: Vec<String>,
+    trusted_dirs: Vec<PathBuf>,
 }
 
 impl ImageInfo {
@@ -30,13 +30,16 @@ impl ImageInfo {
         Self {
             sandbox: PathBuf::from(file_access_dir),
             blocked_dirs,
-            trusted_dirs,
+            trusted_dirs: trusted_dirs
+                .into_iter()
+                .map(|dir| crate::paths::resolve_configured_path(&dir))
+                .filter_map(|dir| crate::paths::canonicalize_for_comparison(&dir).ok())
+                .collect(),
         }
     }
 
     fn is_trusted(&self, path: &Path) -> bool {
-        let s = path.to_string_lossy();
-        self.trusted_dirs.iter().any(|d| s.starts_with(d.as_str()))
+        crate::paths::path_is_trusted(path, &self.trusted_dirs)
     }
 
     async fn do_execute(&self, args: serde_json::Value) -> Result<String> {
@@ -193,7 +196,7 @@ fn parse_jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         }
         let marker = bytes[i + 1];
         // SOF0, SOF1, SOF2, SOF3
-        if matches!(marker, 0xC0 | 0xC1 | 0xC2 | 0xC3) && i + 9 < bytes.len() {
+        if matches!(marker, 0xC0..=0xC3) && i + 9 < bytes.len() {
             let h = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
             let w = u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]) as u32;
             return Some((w, h));

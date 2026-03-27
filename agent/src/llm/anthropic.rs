@@ -263,13 +263,12 @@ impl AnthropicClient {
                                 "text_delta" => {
                                     if let Some(text) =
                                         delta.get("text").and_then(|v| v.as_str())
+                                        && !text.is_empty()
                                     {
-                                        if !text.is_empty() {
-                                            full_text.push_str(text);
-                                            let _ = tx
-                                                .send(StreamEvent::Delta(text.to_string()))
-                                                .await;
-                                        }
+                                        full_text.push_str(text);
+                                        let _ = tx
+                                            .send(StreamEvent::Delta(text.to_string()))
+                                            .await;
                                     }
                                 }
                                 "input_json_delta" => {

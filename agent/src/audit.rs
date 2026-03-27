@@ -2,7 +2,7 @@
 //!
 //! Writes JSONL (one JSON object per line) to the configured audit log file.
 
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -40,8 +40,16 @@ pub enum AuditEvent {
 
 // ─── AuditLogger ────────────────────────────────────────────────────────────
 
+const AUDIT_BUFFER_CAPACITY: usize = 64 * 1024;
+const AUDIT_FLUSH_EVERY: usize = 16;
+
+struct AuditWriter {
+    writer: BufWriter<std::fs::File>,
+    pending_events: usize,
+}
+
 pub struct AuditLogger {
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: Mutex<AuditWriter>,
 }
 
 impl AuditLogger {
@@ -69,11 +77,15 @@ impl AuditLogger {
             .open(path)?;
 
         Ok(Self {
-            writer: Mutex::new(Box::new(file)),
+            writer: Mutex::new(AuditWriter {
+                writer: BufWriter::with_capacity(AUDIT_BUFFER_CAPACITY, file),
+                pending_events: 0,
+            }),
         })
     }
 
     /// Log a tool call event.
+    #[allow(clippy::too_many_arguments)]
     pub fn log_tool_call(
         &self,
         trace_id: &str,
@@ -101,6 +113,7 @@ impl AuditLogger {
     }
 
     /// Log an LLM call event.
+    #[allow(clippy::too_many_arguments)]
     pub fn log_llm_call(
         &self,
         trace_id: &str,
@@ -140,11 +153,18 @@ impl AuditLogger {
                 return;
             }
         };
-        if let Err(e) = writeln!(writer, "{json}") {
+        if let Err(e) = writeln!(writer.writer, "{json}") {
             tracing::warn!(error = %e, "audit: failed to write event");
+            return;
         }
-        if let Err(e) = writer.flush() {
-            tracing::warn!(error = %e, "audit: failed to flush writer");
+
+        writer.pending_events += 1;
+        if writer.pending_events >= AUDIT_FLUSH_EVERY {
+            if let Err(e) = writer.writer.flush() {
+                tracing::warn!(error = %e, "audit: failed to flush writer");
+                return;
+            }
+            writer.pending_events = 0;
         }
     }
 }
