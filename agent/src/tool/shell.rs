@@ -313,6 +313,9 @@ impl ShellExec {
             cmd.current_dir(dir);
         }
 
+        #[cfg(not(target_os = "windows"))]
+        let _ = managed_runtime;
+
         #[cfg(target_os = "windows")]
         {
             if managed_runtime {
@@ -330,6 +333,9 @@ impl ShellExec {
         if let Some(dir) = &self.working_dir {
             cmd.current_dir(dir);
         }
+
+        #[cfg(not(target_os = "windows"))]
+        let _ = managed_runtime;
 
         #[cfg(target_os = "windows")]
         {
@@ -412,7 +418,9 @@ impl ShellExec {
     fn check_blocked_dirs(&self, command: &str) -> Result<()> {
         for dir in &self.blocked_dirs {
             if command.contains(dir.as_str()) {
-                bail!("command references blocked directory: {dir} / 命令引用了被阻止的目录: {dir}");
+                bail!(
+                    "command references blocked directory: {dir} / 命令引用了被阻止的目录: {dir}"
+                );
             }
         }
         Ok(())
@@ -443,7 +451,9 @@ impl ShellExec {
                 || trimmed.ends_with(" /")
                 || trimmed.ends_with(" ~");
             if has_recursive && has_force && targets_critical {
-                bail!("blocked: destructive rm against critical directory / 已阻止: 对关键目录执行破坏性 rm 操作");
+                bail!(
+                    "blocked: destructive rm against critical directory / 已阻止: 对关键目录执行破坏性 rm 操作"
+                );
             }
         }
 
@@ -473,13 +483,17 @@ impl ShellExec {
 
             // Check blocked commands (applies to ALL modes)
             if self.blocked.contains(first_token) {
-                bail!("command `{first_token}` is blocked for safety reasons / 命令 `{first_token}` 因安全原因被阻止");
+                bail!(
+                    "command `{first_token}` is blocked for safety reasons / 命令 `{first_token}` 因安全原因被阻止"
+                );
             }
 
             // Check if the segment starts with any blocked pattern
             for blocked in &self.blocked {
                 if segment.starts_with(blocked.as_str()) {
-                    bail!("command pattern `{blocked}` is blocked for safety reasons / 命令模式 `{blocked}` 因安全原因被阻止");
+                    bail!(
+                        "command pattern `{blocked}` is blocked for safety reasons / 命令模式 `{blocked}` 因安全原因被阻止"
+                    );
                 }
             }
 
@@ -590,11 +604,15 @@ impl ShellExec {
                         stderr_preview = %Self::preview_for_log(&stderr),
                         "managed runtime: uv installer failed / 托管运行时: uv 安装器失败"
                     );
-                    bail!("failed to install uv automatically via PowerShell installer / 通过 PowerShell 安装器自动安装 uv 失败")
+                    bail!(
+                        "failed to install uv automatically via PowerShell installer / 通过 PowerShell 安装器自动安装 uv 失败"
+                    )
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, "managed runtime: failed to launch uv installer / 托管运行时: 启动 uv 安装器失败");
-                    bail!("failed to install uv automatically via PowerShell installer / 通过 PowerShell 安装器自动安装 uv 失败")
+                    bail!(
+                        "failed to install uv automatically via PowerShell installer / 通过 PowerShell 安装器自动安装 uv 失败"
+                    )
                 }
             }
         }
@@ -625,11 +643,15 @@ impl ShellExec {
                         stderr_preview = %Self::preview_for_log(&stderr),
                         "managed runtime: uv installer failed / 托管运行时: uv 安装器失败"
                     );
-                    bail!("failed to install uv automatically; curl or wget is required / 自动安装 uv 失败；需要 curl 或 wget")
+                    bail!(
+                        "failed to install uv automatically; curl or wget is required / 自动安装 uv 失败；需要 curl 或 wget"
+                    )
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, "managed runtime: failed to launch uv installer / 托管运行时: 启动 uv 安装器失败");
-                    bail!("failed to install uv automatically; curl or wget is required / 自动安装 uv 失败；需要 curl 或 wget")
+                    bail!(
+                        "failed to install uv automatically; curl or wget is required / 自动安装 uv 失败；需要 curl 或 wget"
+                    )
                 }
             }
         }
@@ -662,7 +684,9 @@ impl ShellExec {
 
     fn ensure_managed_python_runtime_blocking(&self) -> Result<PathBuf> {
         let Some(venv_abs) = self.managed_venv_path() else {
-            bail!("managed Python runtime requested without a configured venv path / 请求托管 Python 运行时但未配置 venv 路径")
+            bail!(
+                "managed Python runtime requested without a configured venv path / 请求托管 Python 运行时但未配置 venv 路径"
+            )
         };
 
         let python_bin = Self::managed_python_binary(&venv_abs);
@@ -702,11 +726,19 @@ impl ShellExec {
                     stderr_preview = %Self::preview_for_log(&stderr),
                     "managed runtime: Python installation step failed / 托管运行时: Python 安装步骤失败"
                 );
-                bail!("failed to install managed Python {} with uv / 使用 uv 安装托管 Python {} 失败", version, version)
+                bail!(
+                    "failed to install managed Python {} with uv / 使用 uv 安装托管 Python {} 失败",
+                    version,
+                    version
+                )
             }
             Err(error) => {
                 tracing::warn!(error = %error, python = %version, "managed runtime: failed to launch `uv python install` / 托管运行时: 启动 `uv python install` 失败");
-                bail!("failed to install managed Python {} with uv / 使用 uv 安装托管 Python {} 失败", version, version)
+                bail!(
+                    "failed to install managed Python {} with uv / 使用 uv 安装托管 Python {} 失败",
+                    version,
+                    version
+                )
             }
         }
 
@@ -734,11 +766,19 @@ impl ShellExec {
                     stderr_preview = %Self::preview_for_log(&stderr),
                     "managed runtime: venv creation step failed / 托管运行时: venv 创建步骤失败"
                 );
-                bail!("failed to create managed venv at {} / 在 {} 创建托管 venv 失败", venv_abs.display(), venv_abs.display())
+                bail!(
+                    "failed to create managed venv at {} / 在 {} 创建托管 venv 失败",
+                    venv_abs.display(),
+                    venv_abs.display()
+                )
             }
             Err(error) => {
                 tracing::warn!(error = %error, venv = %venv_abs.display(), "managed runtime: failed to launch `uv venv` / 托管运行时: 启动 `uv venv` 失败");
-                bail!("failed to create managed venv at {} / 在 {} 创建托管 venv 失败", venv_abs.display(), venv_abs.display())
+                bail!(
+                    "failed to create managed venv at {} / 在 {} 创建托管 venv 失败",
+                    venv_abs.display(),
+                    venv_abs.display()
+                )
             }
         }
 
@@ -953,7 +993,11 @@ impl ShellExec {
             }
             Err(_) => {
                 tracing::warn!(command = %command, managed_runtime, timeout_secs = timeout.as_secs(), "shell: command timed out / shell: 命令超时");
-                bail!("command timed out after {:?} / 命令在 {:?} 后超时", timeout, timeout)
+                bail!(
+                    "command timed out after {:?} / 命令在 {:?} 后超时",
+                    timeout,
+                    timeout
+                )
             }
         }
     }

@@ -125,7 +125,8 @@ impl AgentCore {
             Ok((reply, messages)) => (reply, messages),
             Err(e) => {
                 tracing::error!(error = %e, "agent handle failed / 代理处理失败");
-                let reply = OutboundMessage::error(msg, &format!("Processing failed / 处理失败: {e}"));
+                let reply =
+                    OutboundMessage::error(msg, &format!("Processing failed / 处理失败: {e}"));
                 (reply, vec![])
             }
         }
@@ -142,7 +143,8 @@ impl AgentCore {
             Ok((reply, messages)) => (reply, messages),
             Err(e) => {
                 tracing::error!(error = %e, "agent streaming handle failed / 代理流式处理失败");
-                let reply = OutboundMessage::error(msg, &format!("Processing failed / 处理失败: {e}"));
+                let reply =
+                    OutboundMessage::error(msg, &format!("Processing failed / 处理失败: {e}"));
                 (reply, vec![])
             }
         }
@@ -312,7 +314,9 @@ impl AgentCore {
                         }
                     }
                     None => {
-                        return Err(anyhow::anyhow!("stream ended without Done event / 流未收到 Done 事件"));
+                        return Err(anyhow::anyhow!(
+                            "stream ended without Done event / 流未收到 Done 事件"
+                        ));
                     }
                 }
             } else {
@@ -560,14 +564,19 @@ impl AgentCore {
                 return Ok((reply, persist_messages));
             } else {
                 // Empty response — treat as error
-                let reply = OutboundMessage::error(msg, "LLM returned an empty response / LLM 返回了空响应");
+                let reply = OutboundMessage::error(
+                    msg,
+                    "LLM returned an empty response / LLM 返回了空响应",
+                );
                 let persist_messages = messages[persist_start..].to_vec();
                 return Ok((reply, persist_messages));
             }
         }
 
         // Exceeded max rounds
-        let error_text = format!("Exceeded max round limit ({max_rounds} rounds), stopped / 处理超过最大轮次限制 ({max_rounds} 轮)，已停止");
+        let error_text = format!(
+            "Exceeded max round limit ({max_rounds} rounds), stopped / 处理超过最大轮次限制 ({max_rounds} 轮)，已停止"
+        );
         messages.push(ChatMessage::assistant(&error_text));
 
         let reply = OutboundMessage::error(msg, &error_text);
@@ -804,7 +813,30 @@ max_tool_rounds = 3
     #[tokio::test]
     async fn test_max_rounds_exceeded() {
         let memory = test_memory().await;
-        let config = test_config(); // max_tool_rounds = 3
+        let config = Arc::new(
+            AppConfig::load_from_str(
+                r#"
+[app]
+name = "test"
+workspace = "."
+log_level = "info"
+
+[feishu]
+app_id = "test"
+app_secret = "test"
+
+[llm]
+provider = "anthropic"
+model = "test"
+api_key = "test"
+
+[agent]
+max_tool_rounds = 3
+max_consecutive_tool_errors = 10
+"#,
+            )
+            .unwrap(),
+        );
 
         // Mock always returns tool calls — never a text reply
         let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
@@ -812,7 +844,7 @@ max_tool_rounds = 3
             tool_calls: vec![ToolCall {
                 id: "call_loop".into(),
                 name: "shell_exec".into(),
-                arguments: serde_json::json!({"command": "date"}),
+                arguments: serde_json::json!({"command": "echo loop"}),
             }],
         }]));
 

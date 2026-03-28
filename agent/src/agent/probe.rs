@@ -12,6 +12,7 @@ use crate::config::AgentSection;
 pub struct BinaryInfo {
     pub available: bool,
     pub version: Option<String>,
+    #[allow(dead_code)]
     pub path: Option<String>,
 }
 
