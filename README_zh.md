@@ -30,50 +30,167 @@ Feishu/HTTP/CLI Channel -> Gateway -> AgentCore -> ToolRegistry/MemoryStore -> C
 - `memory`：SQLite 历史与长期记忆
 - `audit` / `metrics` / `scheduler`：审计、指标与后台任务
 
-## 快速开始
+## 部署
 
-1. 构建
+前提：
+
+- 已拿到与你的系统和 CPU 架构匹配的发布文件
+- 已准备配置文件
+- 程序目录和数据目录可读写
+- 目标机器能访问所用的 LLM 服务和通道依赖
+
+### Windows
+
+推荐路径：
+
+```text
+C:\anqclaw\anqclaw.exe
+```
+
+可选：将 `C:\anqclaw\` 加入 PATH。
+
+已加入 PATH：
+
+```powershell
+anqclaw.exe onboard
+anqclaw.exe config validate
+anqclaw.exe serve
+```
+
+未加入 PATH：
+
+```powershell
+C:\anqclaw\anqclaw.exe onboard
+C:\anqclaw\anqclaw.exe config validate
+C:\anqclaw\anqclaw.exe serve
+```
+
+按需：
+
+- 安装 Microsoft Visual C++ Redistributable
+- 如果启用 Python 自举或自动装包，安装 Python 或 `uv`
+- 如果 prompt 或 custom tool 依赖外部命令，安装对应命令
+
+### Linux
+
+推荐路径：
+
+```text
+/opt/anqclaw/anqclaw
+```
+
+准备：
+
+```bash
+chmod +x /opt/anqclaw/anqclaw
+ln -sf /opt/anqclaw/anqclaw /usr/local/bin/anqclaw
+```
+
+已加入 PATH：
+
+```bash
+anqclaw onboard
+anqclaw config validate
+anqclaw serve
+```
+
+未加入 PATH：
+
+```bash
+/opt/anqclaw/anqclaw onboard
+/opt/anqclaw/anqclaw config validate
+/opt/anqclaw/anqclaw serve
+```
+
+按需：
+
+- 如果启用 Python 自举或自动装包，安装 Python 或 `uv`
+- 如果 prompt 或 custom tool 依赖外部命令，安装对应命令
+
+### macOS
+
+推荐路径：
+
+```text
+/usr/local/anqclaw/anqclaw
+```
+
+准备：
+
+```bash
+chmod +x /usr/local/anqclaw/anqclaw
+ln -sf /usr/local/anqclaw/anqclaw /usr/local/bin/anqclaw
+```
+
+已加入 PATH：
+
+```bash
+anqclaw onboard
+anqclaw config validate
+anqclaw serve
+```
+
+未加入 PATH：
+
+```bash
+/usr/local/anqclaw/anqclaw onboard
+/usr/local/anqclaw/anqclaw config validate
+/usr/local/anqclaw/anqclaw serve
+```
+
+按需：
+
+- 首次运行如被系统阻止，执行 `xattr -d com.apple.quarantine /usr/local/anqclaw/anqclaw`
+- 如果启用 Python 自举或自动装包，安装 Python 或 `uv`
+- 如果 prompt 或 custom tool 依赖外部命令，安装对应命令
+
+## 开发
+
+只有改代码、调试、跑本地开发流程时才需要这一节。
+
+前提：
+
+- `rustup`、`rustc`、`cargo`
+- 平台构建工具链
+  - Windows：Visual Studio Build Tools / MSVC
+  - Linux：`gcc` 或 `clang`
+
+常用命令：
 
 ```bash
 cd agent
 cargo build
-```
-
-2. 首次初始化
-
-```bash
 cargo run -- onboard
-```
-
-3. CLI 对话
-
-```bash
-cargo run -- chat "你好"
-# 或交互模式
 cargo run -- chat
-```
-
-4. 启动服务
-
-```bash
 cargo run -- serve
-```
-
-5. 查看或校验配置
-
-```bash
-cargo run -- config show
 cargo run -- config validate
 ```
+
+## 从源码构建发布版
+
+前提：已安装 Rust 工具链。
+
+构建：
+
+```bash
+cd agent
+cargo build --release
+```
+
+产物路径：
+
+- Windows：`agent/target/release/anqclaw.exe`
+- Linux/macOS：`agent/target/release/anqclaw`
 
 ## 质量状态
 
 - 本地已完成 `cargo test --manifest-path agent/Cargo.toml`
-- 项目已接入 CI，执行测试、clippy 和 cargo-audit
+- 本地验证也包括 `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo audit` 已纳入本地依赖检查；当前仍有少量来自上游传递依赖的告警
 - 最近一轮修复已覆盖 custom tool、trusted path、web SSRF、stream 中断、Feishu token 刷新、长期记忆并发写入等回归场景
 
 ## 文档
 
 - 自主能力链设计：[docs/autonomous-capability-chain-design.md](docs/autonomous-capability-chain-design.md)
-- 基础架构设计基线：[docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md](docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md)
-- 文件提取设计：[docs/superpowers/specs/2026-03-26-file-extraction-design.md](docs/superpowers/specs/2026-03-26-file-extraction-design.md)
+- 基础架构设计基线：[docs/2026-03-24-anqclaw-v1-design.md](docs/2026-03-24-anqclaw-v1-design.md)
+- 文件提取设计：[docs/2026-03-26-file-extraction-design.md](docs/2026-03-26-file-extraction-design.md)

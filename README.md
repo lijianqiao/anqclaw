@@ -30,50 +30,167 @@ Core modules:
 - `memory`: SQLite-backed history and long-term memory
 - `audit` / `metrics` / `scheduler`: auditing, metrics, and background tasks
 
-## Quick Start
+## Deployment
 
-1. Build
+Requirements:
+
+- A matching release binary for your OS and CPU architecture
+- A valid config file
+- Read/write access for the app directory and data directory
+- Network access to your LLM provider and channel integrations
+
+### Windows
+
+Recommended path:
+
+```text
+C:\anqclaw\anqclaw.exe
+```
+
+Optional: add `C:\anqclaw\` to `PATH`.
+
+With `PATH`:
+
+```powershell
+anqclaw.exe onboard
+anqclaw.exe config validate
+anqclaw.exe serve
+```
+
+Without `PATH`:
+
+```powershell
+C:\anqclaw\anqclaw.exe onboard
+C:\anqclaw\anqclaw.exe config validate
+C:\anqclaw\anqclaw.exe serve
+```
+
+As needed:
+
+- Install Microsoft Visual C++ Redistributable
+- Install Python or `uv` if you enable Python bootstrap or package installation flows
+- Install any external commands required by your prompts or custom tools
+
+### Linux
+
+Recommended path:
+
+```text
+/opt/anqclaw/anqclaw
+```
+
+Prepare:
+
+```bash
+chmod +x /opt/anqclaw/anqclaw
+ln -sf /opt/anqclaw/anqclaw /usr/local/bin/anqclaw
+```
+
+With `PATH`:
+
+```bash
+anqclaw onboard
+anqclaw config validate
+anqclaw serve
+```
+
+Without `PATH`:
+
+```bash
+/opt/anqclaw/anqclaw onboard
+/opt/anqclaw/anqclaw config validate
+/opt/anqclaw/anqclaw serve
+```
+
+As needed:
+
+- Install Python or `uv` if you enable Python bootstrap or package installation flows
+- Install any external commands required by your prompts or custom tools
+
+### macOS
+
+Recommended path:
+
+```text
+/usr/local/anqclaw/anqclaw
+```
+
+Prepare:
+
+```bash
+chmod +x /usr/local/anqclaw/anqclaw
+ln -sf /usr/local/anqclaw/anqclaw /usr/local/bin/anqclaw
+```
+
+With `PATH`:
+
+```bash
+anqclaw onboard
+anqclaw config validate
+anqclaw serve
+```
+
+Without `PATH`:
+
+```bash
+/usr/local/anqclaw/anqclaw onboard
+/usr/local/anqclaw/anqclaw config validate
+/usr/local/anqclaw/anqclaw serve
+```
+
+As needed:
+
+- If the first launch is blocked, run `xattr -d com.apple.quarantine /usr/local/anqclaw/anqclaw`
+- Install Python or `uv` if you enable Python bootstrap or package installation flows
+- Install any external commands required by your prompts or custom tools
+
+## Development
+
+Use this section only if you are changing code or debugging locally.
+
+Requirements:
+
+- `rustup`, `rustc`, `cargo`
+- Platform build tools
+  - Windows: Visual Studio Build Tools / MSVC
+  - Linux: `gcc` or `clang`
+
+Common commands:
 
 ```bash
 cd agent
 cargo build
-```
-
-2. Initial setup
-
-```bash
 cargo run -- onboard
-```
-
-3. CLI chat
-
-```bash
-cargo run -- chat "hello"
-# or interactive mode
 cargo run -- chat
-```
-
-4. Start the service
-
-```bash
 cargo run -- serve
-```
-
-5. Show or validate configuration
-
-```bash
-cargo run -- config show
 cargo run -- config validate
 ```
+
+## Build a Release Binary
+
+Requirement: Rust toolchain installed.
+
+Build:
+
+```bash
+cd agent
+cargo build --release
+```
+
+Output:
+
+- Windows: `agent/target/release/anqclaw.exe`
+- Linux/macOS: `agent/target/release/anqclaw`
 
 ## Quality Status
 
 - Local validation has passed with `cargo test --manifest-path agent/Cargo.toml`
-- CI is in place for tests, clippy, and cargo-audit
+- Local validation also includes `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo audit` is used as a local dependency check; some remaining advisories are currently inherited from upstream transitive dependencies
 - Recent regression coverage includes custom tools, trusted path handling, web SSRF, interrupted streams, Feishu token refresh, and concurrent long-term memory writes
 
 ## Docs
 
 - Autonomous capability chain design: [docs/autonomous-capability-chain-design.md](docs/autonomous-capability-chain-design.md)
-- Baseline architecture design: [docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md](docs/superpowers/specs/2026-03-24-anqclaw-v1-design.md)
-- File extraction design: [docs/superpowers/specs/2026-03-26-file-extraction-design.md](docs/superpowers/specs/2026-03-26-file-extraction-design.md)
+- Baseline architecture design: [docs/2026-03-24-anqclaw-v1-design.md](docs/2026-03-24-anqclaw-v1-design.md)
+- File extraction design: [docs/2026-03-26-file-extraction-design.md](docs/2026-03-26-file-extraction-design.md)

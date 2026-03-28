@@ -6,7 +6,7 @@ pub use sections::*;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 use defaults::*;
@@ -87,7 +87,9 @@ struct RawLlmProfile {
 /// Detection: if the TOML `[llm]` value has a `provider` key, it's legacy (flat).
 /// Otherwise it's multi-profile.
 fn parse_llm_profiles(llm_value: &toml::Value) -> Result<HashMap<String, RawLlmProfile>> {
-    let table = llm_value.as_table().context("[llm] must be a TOML table / [llm] 必须是 TOML 表")?;
+    let table = llm_value
+        .as_table()
+        .context("[llm] must be a TOML table / [llm] 必须是 TOML 表")?;
 
     // Detect: if it has a "provider" or "model" or "api_key" key at the top level,
     // treat as legacy single profile → wrap as { "default": ... }
@@ -113,7 +115,9 @@ fn parse_llm_profiles(llm_value: &toml::Value) -> Result<HashMap<String, RawLlmP
             map.insert(name.clone(), profile);
         }
         if map.is_empty() {
-            anyhow::bail!("[llm] section is empty — at least one LLM profile is required / [llm] 段为空 - 至少需要一个 LLM 配置");
+            anyhow::bail!(
+                "[llm] section is empty — at least one LLM profile is required / [llm] 段为空 - 至少需要一个 LLM 配置"
+            );
         }
         Ok(map)
     }
@@ -211,15 +215,20 @@ fn resolve_env_optional(value: &str) -> String {
 impl AppConfig {
     /// Load configuration from a TOML file.
     pub fn load(path: &str) -> Result<Self> {
-        let raw_text = std::fs::read_to_string(path)
-            .with_context(|| format!("Cannot read config file: {} / 无法读取配置文件: {}", path, path))?;
+        let raw_text = std::fs::read_to_string(path).with_context(|| {
+            format!(
+                "Cannot read config file: {} / 无法读取配置文件: {}",
+                path, path
+            )
+        })?;
 
         Self::load_from_str(&raw_text)
     }
 
     /// Parse configuration from a TOML string (useful for tests).
     pub fn load_from_str(toml_text: &str) -> Result<Self> {
-        let raw: RawAppConfig = toml::from_str(toml_text).context("Failed to parse config TOML / 解析配置 TOML 失败")?;
+        let raw: RawAppConfig = toml::from_str(toml_text)
+            .context("Failed to parse config TOML / 解析配置 TOML 失败")?;
 
         // --- Feishu (optional) ---
         // [channel.feishu] takes precedence over legacy [feishu]
@@ -287,9 +296,7 @@ impl AppConfig {
         let llm = LlmSection {
             provider: active_profile.provider.clone(),
             model: active_profile.model.clone(),
-            api_key: SecretString::new(
-                active_profile.api_key.expose_secret().clone().into(),
-            ),
+            api_key: SecretString::new(active_profile.api_key.expose_secret().to_owned().into()),
             base_url: active_profile.base_url.clone(),
             max_tokens: active_profile.max_tokens,
             temperature: active_profile.temperature,
