@@ -1,32 +1,35 @@
 name: CI
 
 on:
-    push:
-    pull_request:
+  push:
+  pull_request:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-    rust-checks:
-        runs-on: ubuntu-latest
-        defaults:
-            run:
-                working-directory: agent
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
+  rust-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-            - name: Install Rust
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  components: clippy
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
-            - name: Install cargo-audit
-              uses: taiki-e/install-action@cargo-audit
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
 
-            - name: Run tests
-              run: cargo test --all-features
+      - name: Run tests
+        run: cargo test --all-features
 
-            - name: Run clippy
-              run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-            - name: Run cargo audit
-              run: cargo audit
+      - name: Run cargo audit
+        run: cargo audit

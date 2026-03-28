@@ -20,6 +20,7 @@ permissions:
     contents: write
 
 env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     MANIFEST_PATH: agent/Cargo.toml
 
 jobs:
@@ -89,7 +90,7 @@ jobs:
                       archive_name: anqclaw-x86_64-unknown-linux-gnu.tar.gz
                       binary_path: agent/target/release/anqclaw
                       packaged_binary_name: anqclaw
-                    - runner: macos-13
+                    - runner: macos-15-intel
                       asset_name: anqclaw-x86_64-apple-darwin
                       archive_name: anqclaw-x86_64-apple-darwin.tar.gz
                       binary_path: agent/target/release/anqclaw
