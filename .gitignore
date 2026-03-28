@@ -1,4 +1,5 @@
 CLAUDE.md
-.github/
+.github/hooks/
+.github/skills/
 .vscode/
 .idea/
