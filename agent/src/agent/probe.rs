@@ -87,7 +87,7 @@ impl EnvironmentProbe {
                 .filter(|(_, b)| b.available)
                 .map(|(n, _)| n.as_str())
                 .collect::<Vec<_>>(),
-            "environment probe complete"
+            "environment probe complete / 环境探测完成"
         );
         probe
     }

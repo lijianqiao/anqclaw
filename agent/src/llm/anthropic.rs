@@ -38,7 +38,7 @@ impl AnthropicClient {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
-            .context("build reqwest client")?;
+            .context("build reqwest client / 构建 reqwest 客户端失败")?;
 
         Ok(Self {
             http,
@@ -105,7 +105,7 @@ impl AnthropicClient {
         for attempt in 0..3u32 {
             if attempt > 0 {
                 let backoff = Duration::from_millis(1000 * 2u64.pow(attempt - 1));
-                tracing::warn!(attempt, ?backoff, "retrying Anthropic request");
+                tracing::warn!(attempt, ?backoff, "retrying Anthropic request / 正在重试 Anthropic 请求");
                 tokio::time::sleep(backoff).await;
             }
 
@@ -122,7 +122,7 @@ impl AnthropicClient {
             match resp {
                 Ok(r) if r.status().is_success() => {
                     let ant_resp: AntResponse =
-                        r.json().await.context("deserialise Anthropic response")?;
+                        r.json().await.context("deserialise Anthropic response / 反序列化 Anthropic 响应失败")?;
                     return parse_ant_response(ant_resp);
                 }
                 Ok(r)
@@ -132,13 +132,13 @@ impl AnthropicClient {
                 {
                     let status = r.status();
                     let text = r.text().await.unwrap_or_default();
-                    tracing::warn!(%status, body = %text, "retryable error from Anthropic");
+                    tracing::warn!(%status, body = %text, "retryable error from Anthropic / Anthropic 可重试错误");
                     last_err = Some(anyhow::anyhow!("HTTP {status}: {text}"));
                 }
                 Ok(r) => {
                     let status = r.status();
                     let text = r.text().await.unwrap_or_default();
-                    anyhow::bail!("Anthropic non-retryable error HTTP {status}: {text}");
+                    anyhow::bail!("Anthropic non-retryable error HTTP {status}: {text} / Anthropic 不可重试错误 HTTP {status}: {text}");
                 }
                 Err(e) => {
                     last_err = Some(e.into());
@@ -146,7 +146,7 @@ impl AnthropicClient {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Anthropic request failed after retries")))
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Anthropic request failed after retries / Anthropic 请求在重试后仍然失败")))
     }
 
     /// Streaming version — sends SSE request, returns a channel of StreamEvents.
@@ -208,7 +208,7 @@ impl AnthropicClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Anthropic streaming error HTTP {status}: {text}");
+            anyhow::bail!("Anthropic streaming error HTTP {status}: {text} / Anthropic 流式错误 HTTP {status}: {text}");
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -227,7 +227,7 @@ impl AnthropicClient {
                     Ok(Some(chunk)) => {
                         buffer.extend_from_slice(&chunk);
                         if buffer.len() > MAX_BUFFER_SIZE {
-                            tracing::warn!("Anthropic SSE buffer exceeded limit, truncating");
+                            tracing::warn!("Anthropic SSE buffer exceeded limit, truncating / Anthropic SSE 缓冲区超出限制，正在截断");
                             break;
                         }
                     }
@@ -367,7 +367,7 @@ fn drain_complete_sse_lines(buffer: &mut Vec<u8>) -> Vec<String> {
 
         match std::str::from_utf8(line_bytes) {
             Ok(line) => lines.push(line.to_owned()),
-            Err(err) => tracing::warn!(?err, "dropping invalid UTF-8 Anthropic SSE line"),
+            Err(err) => tracing::warn!(?err, "dropping invalid UTF-8 Anthropic SSE line / 丢弃无效 UTF-8 的 Anthropic SSE 行"),
         }
 
         cursor = pos + 1;

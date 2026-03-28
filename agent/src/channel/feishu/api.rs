@@ -322,7 +322,12 @@ impl FeishuApi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, extract::State, http::{HeaderMap, StatusCode}, routing::post};
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+    };
     use secrecy::SecretString;
     use serde_json::json;
     use std::sync::Arc;
@@ -401,7 +406,11 @@ mod tests {
 
         async fn token_handler(State(state): State<FeishuTestState>) -> Json<serde_json::Value> {
             let request_no = state.token_requests.fetch_add(1, Ordering::SeqCst);
-            let token = if request_no == 0 { "token-old" } else { "token-new" };
+            let token = if request_no == 0 {
+                "token-old"
+            } else {
+                "token-new"
+            };
             Json(json!({
                 "code": 0,
                 "tenant_access_token": token,
@@ -437,7 +446,10 @@ mod tests {
         };
 
         let app = Router::new()
-            .route("/open-apis/auth/v3/tenant_access_token/internal", post(token_handler))
+            .route(
+                "/open-apis/auth/v3/tenant_access_token/internal",
+                post(token_handler),
+            )
             .route("/open-apis/im/v1/messages", post(send_handler))
             .with_state(state.clone());
 

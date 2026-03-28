@@ -33,17 +33,17 @@ fn resolve_safe_path(sandbox: &Path, user_path: &str) -> Result<PathBuf> {
     } else {
         let file_name = candidate
             .file_name()
-            .ok_or_else(|| anyhow::anyhow!("path has no file name"))?;
+            .ok_or_else(|| anyhow::anyhow!("path has no file name / 路径没有文件名"))?;
 
         // Walk up to find the highest existing ancestor and canonicalize it.
         let parent = candidate
             .parent()
-            .ok_or_else(|| anyhow::anyhow!("no parent directory for path"))?;
+            .ok_or_else(|| anyhow::anyhow!("no parent directory for path / 路径没有父目录"))?;
         let mut existing_ancestor = parent.to_path_buf();
         while !existing_ancestor.exists() {
             existing_ancestor = existing_ancestor
                 .parent()
-                .ok_or_else(|| anyhow::anyhow!("cannot resolve ancestor path"))?
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve ancestor path / 无法解析祖先路径"))?
                 .to_path_buf();
         }
         let canonical_ancestor = existing_ancestor.canonicalize()?;
@@ -52,7 +52,9 @@ fn resolve_safe_path(sandbox: &Path, user_path: &str) -> Result<PathBuf> {
         let sandbox_canonical = sandbox.canonicalize()?;
         if !canonical_ancestor.starts_with(&sandbox_canonical) {
             bail!(
-                "path `{}` resolves outside the allowed directory `{}`",
+                "path `{}` resolves outside the allowed directory `{}` / 路径 `{}` 解析到允许目录 `{}` 之外",
+                candidate.display(),
+                sandbox_canonical.display(),
                 candidate.display(),
                 sandbox_canonical.display()
             );
@@ -68,7 +70,9 @@ fn resolve_safe_path(sandbox: &Path, user_path: &str) -> Result<PathBuf> {
 
     if !canonical.starts_with(&sandbox_canonical) {
         bail!(
-            "path `{}` is outside the allowed directory `{}`",
+            "path `{}` is outside the allowed directory `{}` / 路径 `{}` 在允许目录 `{}` 之外",
+            canonical.display(),
+            sandbox_canonical.display(),
             canonical.display(),
             sandbox_canonical.display()
         );
@@ -118,7 +122,9 @@ fn check_blocked_dirs(path: &Path, blocked_dirs: &[String]) -> Result<()> {
     for dir in blocked_dirs {
         if path_str.contains(dir.as_str()) {
             bail!(
-                "path `{}` references blocked directory: {}",
+                "path `{}` references blocked directory: {} / 路径 `{}` 引用了被屏蔽的目录: {}",
+                path.display(),
+                dir,
                 path.display(),
                 dir
             );
@@ -234,7 +240,7 @@ impl FileRead {
         let path_str = args
             .get("path")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing `path` parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `path` parameter / 缺少 `path` 参数"))?;
 
         let normalized_path = normalize_tool_path(path_str);
 
@@ -259,7 +265,7 @@ impl FileRead {
         // Step 0: File size pre-check
         let metadata = tokio::fs::metadata(&path)
             .await
-            .map_err(|e| anyhow::anyhow!("stat `{}`: {e}", path.display()))?;
+            .map_err(|e| anyhow::anyhow!("stat `{}`: {e} / 获取文件信息 `{}` 失败: {e}", path.display(), path.display()))?;
         let file_size = metadata.len();
         if file_size > Self::FILE_READ_MAX_SIZE {
             return Ok(format!(
@@ -273,7 +279,7 @@ impl FileRead {
         // Step 1: Read raw bytes once (avoids double-read of read_to_string then read)
         let bytes = tokio::fs::read(&path)
             .await
-            .map_err(|e| anyhow::anyhow!("read `{}`: {e}", path.display()))?;
+            .map_err(|e| anyhow::anyhow!("read `{}`: {e} / 读取文件 `{}` 失败: {e}", path.display(), path.display()))?;
 
         // Step 2: Try UTF-8 conversion (zero-copy if valid)
         match String::from_utf8(bytes) {
@@ -390,14 +396,14 @@ impl FileWrite {
         let path_str = args
             .get("path")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing `path` parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `path` parameter / 缺少 `path` 参数"))?;
 
         let normalized_path = normalize_tool_path(path_str);
 
         let content = args
             .get("content")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing `content` parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `content` parameter / 缺少 `content` 参数"))?;
 
         let path = resolve_safe_path(&self.sandbox, &normalized_path);
         let path = match path {
@@ -419,7 +425,7 @@ impl FileWrite {
 
         tokio::fs::write(&path, content)
             .await
-            .map_err(|e| anyhow::anyhow!("write `{}`: {e}", path.display()))?;
+            .map_err(|e| anyhow::anyhow!("write `{}`: {e} / 写入文件 `{}` 失败: {e}", path.display(), path.display()))?;
 
         Ok(format!(
             "Written {} bytes to {}",

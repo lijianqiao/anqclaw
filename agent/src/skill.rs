@@ -42,7 +42,7 @@ impl SkillRegistry {
     /// Returns a registry with all valid skills found.
     pub fn scan(skills_dir: &Path) -> Self {
         let skills = scan_skills(skills_dir);
-        tracing::info!(count = skills.len(), "skills loaded");
+        tracing::info!(count = skills.len(), "skills loaded / 技能已加载");
         Self {
             skills: std::sync::RwLock::new(skills),
             dir: skills_dir.to_path_buf(),
@@ -63,12 +63,15 @@ impl SkillRegistry {
             Ok(mut guard) => *guard = new_skills,
             Err(e) => *e.into_inner() = new_skills,
         }
-        tracing::info!(count, "skills reloaded");
+        tracing::info!(count, "skills reloaded / 技能已重新加载");
     }
 
     /// Returns metadata for all loaded skills (cloned snapshot).
     pub fn list(&self) -> Vec<SkillMeta> {
-        self.skills.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.skills
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Find a skill by name.
@@ -85,10 +88,10 @@ impl SkillRegistry {
     pub fn load_content(&self, name: &str) -> Result<String> {
         let meta = self
             .find(name)
-            .ok_or_else(|| anyhow::anyhow!("skill `{name}` not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("skill `{name}` not found / 技能 `{name}` 未找到"))?;
 
         let raw = std::fs::read_to_string(&meta.path).map_err(|e| {
-            anyhow::anyhow!("failed to read skill file `{}`: {e}", meta.path.display())
+            anyhow::anyhow!("failed to read skill file `{}`: {e} / 读取技能文件失败", meta.path.display())
         })?;
 
         Ok(strip_frontmatter(&raw))
@@ -124,16 +127,14 @@ impl SkillRegistry {
 
 /// Spawns a background file watcher for the skills directory.
 /// Returns the watcher handle — caller must keep it alive.
-pub fn spawn_skill_watcher(
-    registry: Arc<SkillRegistry>,
-) -> Result<notify::RecommendedWatcher> {
+pub fn spawn_skill_watcher(registry: Arc<SkillRegistry>) -> Result<notify::RecommendedWatcher> {
     use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
 
     let dir = registry.dir().to_path_buf();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
 
-    let mut watcher =
-        recommended_watcher(move |res: std::result::Result<notify::Event, notify::Error>| {
+    let mut watcher = recommended_watcher(
+        move |res: std::result::Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
                 let dominated = matches!(
                     event.kind,
@@ -149,7 +150,8 @@ pub fn spawn_skill_watcher(
                     }
                 }
             }
-        })?;
+        },
+    )?;
 
     watcher.watch(&dir, RecursiveMode::NonRecursive)?;
 
@@ -173,14 +175,14 @@ fn scan_skills(skills_dir: &Path) -> Vec<SkillMeta> {
     let mut skills = Vec::new();
 
     if !skills_dir.exists() {
-        tracing::debug!(dir = %skills_dir.display(), "skills directory not found, skipping");
+        tracing::debug!(dir = %skills_dir.display(), "skills directory not found, skipping / 技能目录未找到，已跳过");
         return skills;
     }
 
     let entries = match std::fs::read_dir(skills_dir) {
         Ok(entries) => entries,
         Err(e) => {
-            tracing::warn!(dir = %skills_dir.display(), error = %e, "failed to read skills directory");
+            tracing::warn!(dir = %skills_dir.display(), error = %e, "failed to read skills directory / 读取技能目录失败");
             return skills;
         }
     };
@@ -190,14 +192,14 @@ fn scan_skills(skills_dir: &Path) -> Vec<SkillMeta> {
         if path.extension().is_some_and(|e| e == "md") {
             match parse_frontmatter(&path) {
                 Ok(Some(meta)) => {
-                    tracing::debug!(name = %meta.name, "loaded skill");
+                    tracing::debug!(name = %meta.name, "loaded skill / 已加载技能");
                     skills.push(meta);
                 }
                 Ok(None) => {
-                    tracing::debug!(path = %path.display(), "skipping .md file without valid frontmatter");
+                    tracing::debug!(path = %path.display(), "skipping .md file without valid frontmatter / 跳过无有效前置元数据的 .md 文件");
                 }
                 Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "failed to parse skill file");
+                    tracing::warn!(path = %path.display(), error = %e, "failed to parse skill file / 解析技能文件失败");
                 }
             }
         }
@@ -248,7 +250,8 @@ fn parse_frontmatter(path: &Path) -> Result<Option<SkillMeta>> {
 
     if name.is_empty() {
         // Use filename as fallback name
-        name = path.file_stem()
+        name = path
+            .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
     }
@@ -259,7 +262,10 @@ fn parse_frontmatter(path: &Path) -> Result<Option<SkillMeta>> {
 
     // If description is empty, use a generic one
     if description.is_empty() {
-        description = format!("Skill loaded from {}", path.file_name().unwrap_or_default().to_string_lossy());
+        description = format!(
+            "Skill loaded from {}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
     }
 
     Ok(Some(SkillMeta {
@@ -357,11 +363,13 @@ mod tests {
         std::fs::write(
             dir.join("skill-a.md"),
             "---\nname: skill-a\ndescription: Skill A\ntrigger: when A\n---\nContent A",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(
             dir.join("skill-b.md"),
             "---\nname: skill-b\ndescription: Skill B\ntrigger: when B\n---\nContent B",
-        ).unwrap();
+        )
+        .unwrap();
         // Create a non-skill file
         std::fs::write(dir.join("readme.txt"), "not a skill").unwrap();
 
@@ -402,7 +410,8 @@ mod tests {
         std::fs::write(
             dir.join("review.md"),
             "---\nname: code-review\ndescription: Code reviewer\ntrigger: review, CR\n---\nBody",
-        ).unwrap();
+        )
+        .unwrap();
 
         let registry = SkillRegistry::scan(&dir);
         let summary = registry.build_summary();

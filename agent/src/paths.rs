@@ -18,7 +18,7 @@ fn home_base_dir() -> PathBuf {
     if let Ok(cwd) = std::env::current_dir() {
         tracing::warn!(
             fallback = %cwd.display(),
-            "cannot determine home directory; falling back to current working directory"
+            "cannot determine home directory; falling back to current working directory / 无法确定主目录；回退到当前工作目录"
         );
         return cwd;
     }
@@ -26,7 +26,7 @@ fn home_base_dir() -> PathBuf {
     let temp = std::env::temp_dir();
     tracing::warn!(
         fallback = %temp.display(),
-        "cannot determine home directory; falling back to temp directory"
+        "cannot determine home directory; falling back to temp directory / 无法确定主目录；回退到临时目录"
     );
     temp
 }

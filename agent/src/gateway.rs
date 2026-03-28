@@ -75,7 +75,7 @@ impl Gateway {
             let ch = ch.clone();
             tokio::spawn(async move {
                 if let Err(e) = ch.start(tx).await {
-                    tracing::error!(channel = ch.name(), error = %e, "channel exited with error");
+                    tracing::error!(channel = ch.name(), error = %e, "channel exited with error / 频道退出并出错");
                 }
             });
         }
@@ -91,7 +91,7 @@ impl Gateway {
                 if capacity < 64 {
                     tracing::warn!(
                         remaining_capacity = capacity,
-                        "gateway: message queue pressure — capacity below 25%"
+                        "gateway: message queue pressure — capacity below 25% / 网关: 消息队列压力 - 容量低于 25%"
                     );
                 }
                 if tx_monitor.is_closed() {
@@ -109,14 +109,16 @@ impl Gateway {
                 // Remove chat locks with no active holders
                 gw_gc.chat_locks.retain(|_, v| Arc::strong_count(v) > 1);
                 // Remove empty rate limiter entries (stale sessions)
-                gw_gc.rate_limiter.retain(|_, timestamps| !timestamps.is_empty());
+                gw_gc
+                    .rate_limiter
+                    .retain(|_, timestamps| !timestamps.is_empty());
             }
         });
 
         // Drop our copy so rx closes when all channel senders are gone
         drop(tx);
 
-        tracing::info!("gateway: message loop started");
+        tracing::info!("gateway: message loop started / 网关: 消息循环已启动");
 
         // Track all spawned process_message tasks
         let mut tasks = JoinSet::new();
@@ -144,11 +146,11 @@ impl Gateway {
         // This prevents the caller from closing DB / exiting while tasks are active.
         tracing::info!(
             pending = tasks.len(),
-            "gateway: message loop ended, waiting for in-flight tasks"
+            "gateway: message loop ended, waiting for in-flight tasks / 网关: 消息循环结束，等待进行中的任务"
         );
         while tasks.join_next().await.is_some() {}
 
-        tracing::info!("gateway: all tasks completed");
+        tracing::info!("gateway: all tasks completed / 网关: 所有任务已完成");
         Ok(())
     }
 
@@ -195,7 +197,7 @@ impl Gateway {
                 tracing::warn!(
                     session_key = %session_key,
                     limit = max_rpm,
-                    "rate limit exceeded"
+                    "rate limit exceeded / 超出速率限制"
                 );
                 let reply = OutboundMessage::error(&msg, "请求过于频繁，请稍后再试");
                 if let Some(ch) = self.find_channel(&msg.channel) {
@@ -217,7 +219,7 @@ impl Gateway {
                     session_key = %session_key,
                     len = text.len(),
                     max = max_len,
-                    "message too long, rejecting"
+                    "message too long, rejecting / 消息过长，已拒绝"
                 );
                 let reply = OutboundMessage::error(
                     &msg,
@@ -242,7 +244,7 @@ impl Gateway {
         if let Some(ch) = self.find_channel(&msg.channel)
             && let Err(e) = ch.acknowledge(&msg).await
         {
-            tracing::debug!(error = %e, "acknowledge failed (non-critical)");
+            tracing::debug!(error = %e, "acknowledge failed (non-critical) / 确认失败（非关键）");
         }
 
         // 1. Load history from SQLite
@@ -251,7 +253,7 @@ impl Gateway {
             .get_history(&session_key, self.config.memory.history_limit as usize)
             .await
             .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "failed to load history");
+                tracing::error!(error = %e, "failed to load history / 加载历史记录失败");
                 vec![]
             });
 
@@ -265,7 +267,7 @@ impl Gateway {
                 .save_conversation(&session_key, &persist_messages)
                 .await
         {
-            tracing::error!(error = %e, "failed to save conversation");
+            tracing::error!(error = %e, "failed to save conversation / 保存对话失败");
         }
 
         // 4. Send reply through the originating channel
@@ -274,11 +276,11 @@ impl Gateway {
                 tracing::error!(
                     channel = ch.name(),
                     error = %e,
-                    "failed to send reply"
+                    "failed to send reply / 发送回复失败"
                 );
             }
         } else {
-            tracing::warn!(channel = %msg.channel, "no matching channel for reply");
+            tracing::warn!(channel = %msg.channel, "no matching channel for reply / 未找到匹配的回复频道");
         }
 
         drop(_guard);

@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use secrecy::ExposeSecret;
 use axum::{
     Json, Router,
     extract::{Multipart, State},
@@ -25,6 +24,7 @@ use axum::{
 };
 use dashmap::DashMap;
 use futures_util::StreamExt;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -100,7 +100,7 @@ impl super::Channel for HttpChannel {
                 .with_state(Arc::new(state));
 
             let listener = tokio::net::TcpListener::bind(&self.config.bind).await?;
-            tracing::info!(bind = %self.config.bind, "http channel listening");
+            tracing::info!(bind = %self.config.bind, "http channel listening / HTTP 频道正在监听");
 
             axum::serve(listener, app).await?;
             Ok(())
@@ -115,7 +115,7 @@ impl super::Channel for HttpChannel {
         Box::pin(async move {
             let reply_to = msg.reply_to.clone().unwrap_or_default();
             if reply_to.is_empty() {
-                tracing::warn!("http channel: send_message with no reply_to, dropping");
+                tracing::warn!("http channel: send_message with no reply_to, dropping / HTTP 频道: send_message 无 reply_to，已丢弃");
                 return Ok(());
             }
             let sender = {
@@ -127,7 +127,7 @@ impl super::Channel for HttpChannel {
             } else {
                 tracing::warn!(
                     reply_to = %reply_to,
-                    "http channel: no pending request for reply_to, dropping"
+                    "http channel: no pending request for reply_to, dropping / HTTP 频道: 无对应 reply_to 的待处理请求，已丢弃"
                 );
             }
             Ok(())
@@ -237,10 +237,17 @@ async fn handle_chat(
 
     // Per-sender rate limiting (30 req/min sliding window)
     {
-        let sender_key = if req.sender_id.is_empty() { "http_user" } else { &req.sender_id };
+        let sender_key = if req.sender_id.is_empty() {
+            "http_user"
+        } else {
+            &req.sender_id
+        };
         let now = Instant::now();
         let window = std::time::Duration::from_secs(60);
-        let mut entry = state.rate_limiter.entry(sender_key.to_string()).or_default();
+        let mut entry = state
+            .rate_limiter
+            .entry(sender_key.to_string())
+            .or_default();
         entry.retain(|t| now.duration_since(*t) < window);
         if entry.len() >= 30 {
             return Err((
@@ -309,14 +316,12 @@ async fn handle_chat(
                 error: "reply channel closed".into(),
             }),
         )),
-        Err(_) => {
-            Err((
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(ErrorResponse {
-                    error: "agent reply timed out".into(),
-                }),
-            ))
-        }
+        Err(_) => Err((
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(ErrorResponse {
+                error: "agent reply timed out".into(),
+            }),
+        )),
     }
 }
 
@@ -378,7 +383,10 @@ async fn handle_chat_stream(
         };
         let now = Instant::now();
         let window = std::time::Duration::from_secs(60);
-        let mut entry = state.rate_limiter.entry(sender_key.to_string()).or_default();
+        let mut entry = state
+            .rate_limiter
+            .entry(sender_key.to_string())
+            .or_default();
         entry.retain(|t| now.duration_since(*t) < window);
         if entry.len() >= 30 {
             return Err((
@@ -442,14 +450,13 @@ async fn handle_chat_stream(
                 .save_conversation(&chat_id_clone, &persist_messages)
                 .await
         {
-            tracing::error!(error = %e, "failed to save streaming conversation");
+            tracing::error!(error = %e, "failed to save streaming conversation / 保存流式对话失败");
         }
     });
 
     // Convert to SSE stream
-    let stream = ReceiverStream::new(delta_rx).map(|text| {
-        Ok::<_, Infallible>(Event::default().data(text))
-    });
+    let stream =
+        ReceiverStream::new(delta_rx).map(|text| Ok::<_, Infallible>(Event::default().data(text)));
 
     Ok(Sse::new(stream))
 }
@@ -604,7 +611,10 @@ async fn handle_chat_multipart(
         };
         let now = Instant::now();
         let window = std::time::Duration::from_secs(60);
-        let mut entry = state.rate_limiter.entry(sender_key.to_string()).or_default();
+        let mut entry = state
+            .rate_limiter
+            .entry(sender_key.to_string())
+            .or_default();
         entry.retain(|t| now.duration_since(*t) < window);
         if entry.len() >= 30 {
             return Err((
@@ -626,7 +636,10 @@ async fn handle_chat_multipart(
 
     // Handle file: extract text content from text-like files
     if let Some((ref filename, ref bytes)) = file_content {
-        let text_extensions = ["txt", "md", "rs", "py", "js", "ts", "json", "toml", "yaml", "yml", "xml", "html", "css", "csv", "log", "sh", "bat", "sql", "go", "java", "c", "cpp", "h", "hpp"];
+        let text_extensions = [
+            "txt", "md", "rs", "py", "js", "ts", "json", "toml", "yaml", "yml", "xml", "html",
+            "css", "csv", "log", "sh", "bat", "sql", "go", "java", "c", "cpp", "h", "hpp",
+        ];
         let ext = std::path::Path::new(filename)
             .extension()
             .and_then(|e| e.to_str())
@@ -636,7 +649,8 @@ async fn handle_chat_multipart(
         if text_extensions.contains(&ext.as_str()) {
             if let Ok(text) = String::from_utf8(bytes.clone()) {
                 // Inject file content into message
-                let file_header = format!("\n\n--- 文件: {} ---\n{}\n--- 文件结束 ---", filename, text);
+                let file_header =
+                    format!("\n\n--- 文件: {} ---\n{}\n--- 文件结束 ---", filename, text);
                 message.push_str(&file_header);
             } else {
                 message.push_str(&format!("\n\n[文件 {} 不是有效的 UTF-8 文本]", filename));
@@ -650,13 +664,11 @@ async fn handle_chat_multipart(
 
     // Build content: always use Text so agent gets the message via to_text()
     // Images are carried in InboundMessage.images instead.
-    let content = MessageContent::Text(
-        if message.is_empty() && image_data.is_some() {
-            "请描述这张图片".to_string()
-        } else {
-            message.clone()
-        }
-    );
+    let content = MessageContent::Text(if message.is_empty() && image_data.is_some() {
+        "请描述这张图片".to_string()
+    } else {
+        message.clone()
+    });
 
     // Register pending oneshot
     let (resp_tx, resp_rx) = oneshot::channel();
@@ -707,14 +719,12 @@ async fn handle_chat_multipart(
                 error: "reply channel closed".into(),
             }),
         )),
-        Err(_) => {
-            Err((
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(ErrorResponse {
-                    error: "agent reply timed out".into(),
-                }),
-            ))
-        }
+        Err(_) => Err((
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(ErrorResponse {
+                error: "agent reply timed out".into(),
+            }),
+        )),
     }
 }
 
@@ -831,11 +841,8 @@ mod tests {
             .unwrap();
 
         // Will timeout waiting for agent reply — that's expected (means auth passed)
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            app.oneshot(req),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), app.oneshot(req)).await;
         assert!(result.is_err(), "expected timeout (no agent configured)");
     }
 
@@ -854,7 +861,9 @@ mod tests {
         {
             let now = Instant::now();
             let timestamps: Vec<Instant> = (0..30).map(|_| now).collect();
-            state.rate_limiter.insert("http_user".to_string(), timestamps);
+            state
+                .rate_limiter
+                .insert("http_user".to_string(), timestamps);
         }
 
         let app = test_router(state);

@@ -27,12 +27,12 @@ impl MemorySave {
         let key = args
             .get("key")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing `key` parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `key` parameter / 缺少 `key` 参数"))?;
 
         let content = args
             .get("content")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing `content` parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `content` parameter / 缺少 `content` 参数"))?;
 
         let tags: Vec<String> = args
             .get("tags")
@@ -108,7 +108,7 @@ impl MemorySearch {
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing `query` parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `query` parameter / 缺少 `query` 参数"))?;
 
         let limit = args
             .get("limit")
@@ -129,7 +129,11 @@ impl MemorySearch {
                 i + 1,
                 mem.key,
                 mem.content,
-                if mem.tags.is_empty() { "(none)" } else { &mem.tags },
+                if mem.tags.is_empty() {
+                    "(none)"
+                } else {
+                    &mem.tags
+                },
             ));
         }
         Ok(output)

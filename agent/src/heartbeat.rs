@@ -60,7 +60,7 @@ impl Heartbeat {
 
         tracing::info!(
             interval_mins = self.interval.as_secs() / 60,
-            "heartbeat: started"
+            "heartbeat: started / 心跳: 已启动"
         );
 
         loop {
@@ -70,7 +70,7 @@ impl Heartbeat {
             let prompt = match tokio::fs::read_to_string(&self.prompt_path).await {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::debug!(error = %e, "heartbeat: HEARTBEAT.md not found, skipping");
+                    tracing::debug!(error = %e, "heartbeat: HEARTBEAT.md not found, skipping / 心跳: HEARTBEAT.md 未找到，已跳过");
                     continue;
                 }
             };
@@ -79,7 +79,7 @@ impl Heartbeat {
                 continue;
             }
 
-            tracing::info!("heartbeat: tick — running agent");
+            tracing::info!("heartbeat: tick, running agent / 心跳: 触发，正在运行代理");
 
             let msg = InboundMessage::heartbeat(&prompt);
 
@@ -99,12 +99,12 @@ impl Heartbeat {
                     .save_conversation(&msg.chat_id, &conversation)
                     .await
             {
-                tracing::error!(error = %e, "heartbeat: failed to save conversation");
+                tracing::error!(error = %e, "heartbeat: failed to save conversation / 心跳: 保存对话失败");
             }
 
             // "HEARTBEAT_OK" convention — LLM says everything is fine, skip notification
             if reply.content.contains("HEARTBEAT_OK") {
-                tracing::debug!("heartbeat: HEARTBEAT_OK — no notification needed");
+                tracing::debug!("heartbeat: HEARTBEAT_OK, no notification needed / 心跳: HEARTBEAT_OK，无需通知");
                 continue;
             }
 
@@ -112,18 +112,22 @@ impl Heartbeat {
             reply.chat_id = self.notify_chat_id.clone();
             reply.channel = self.notify_channel.clone();
 
-            if let Some(ch) = self.channels.iter().find(|c| c.name() == self.notify_channel) {
+            if let Some(ch) = self
+                .channels
+                .iter()
+                .find(|c| c.name() == self.notify_channel)
+            {
                 if let Err(e) = ch.send_message(reply).await {
                     tracing::error!(
                         channel = self.notify_channel.as_str(),
                         error = %e,
-                        "heartbeat: failed to send notification"
+                        "heartbeat: failed to send notification / 心跳: 发送通知失败"
                     );
                 }
             } else {
                 tracing::warn!(
                     channel = self.notify_channel.as_str(),
-                    "heartbeat: no matching channel for notification"
+                    "heartbeat: no matching channel for notification / 心跳: 未找到匹配的通知频道"
                 );
             }
         }

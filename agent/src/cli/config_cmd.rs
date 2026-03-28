@@ -21,7 +21,7 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     let home = anqclaw_home();
 
     let config_path = find_config(cli_config).ok_or_else(|| {
-        anyhow::anyhow!("No config file found. Run `anqclaw onboard` to create one.")
+        anyhow::anyhow!("No config file found / 未找到配置文件. Run `anqclaw onboard` to create one. / 运行 `anqclaw onboard` 创建配置文件。")
     })?;
 
     println!("\x1b[1m📄 Config file:\x1b[0m {}", config_path.display());
@@ -29,7 +29,10 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     println!();
 
     let config_str = config_path.to_str().ok_or_else(|| {
-        anyhow::anyhow!("config path contains invalid UTF-8: {}", config_path.display())
+        anyhow::anyhow!(
+            "config path contains invalid UTF-8 / 配置路径包含无效 UTF-8: {}",
+            config_path.display()
+        )
     })?;
     let mut config = AppConfig::load(config_str)?;
 
@@ -64,7 +67,10 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     }
     println!();
 
-    println!("\x1b[1m[llm]\x1b[0m (active profile: {})", config.agent.llm_profile);
+    println!(
+        "\x1b[1m[llm]\x1b[0m (active profile: {})",
+        config.agent.llm_profile
+    );
     println!("  provider   = {}", config.llm.provider);
     println!("  model      = {}", config.llm.model);
     println!(
@@ -111,7 +117,10 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     println!();
 
     println!("\x1b[1m[security]\x1b[0m");
-    println!("  auto_redact_secrets = {}", config.security.auto_redact_secrets);
+    println!(
+        "  auto_redact_secrets = {}",
+        config.security.auto_redact_secrets
+    );
     if !config.security.trusted_dirs.is_empty() {
         println!("  trusted_dirs        = {:?}", config.security.trusted_dirs);
     }
@@ -119,23 +128,44 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
         println!("  blocked_dirs        = {:?}", config.security.blocked_dirs);
     }
     if !config.security.redact_patterns.is_empty() {
-        println!("  redact_patterns     = {:?}", config.security.redact_patterns);
+        println!(
+            "  redact_patterns     = {:?}",
+            config.security.redact_patterns
+        );
     }
     println!();
 
     println!("\x1b[1m[limits]\x1b[0m");
-    println!("  max_requests_per_minute    = {}", config.limits.max_requests_per_minute);
-    println!("  max_tokens_per_conversation = {}", config.limits.max_tokens_per_conversation);
-    println!("  max_message_length         = {}", config.limits.max_message_length);
+    println!(
+        "  max_requests_per_minute    = {}",
+        config.limits.max_requests_per_minute
+    );
+    println!(
+        "  max_tokens_per_conversation = {}",
+        config.limits.max_tokens_per_conversation
+    );
+    println!(
+        "  max_message_length         = {}",
+        config.limits.max_message_length
+    );
     println!();
 
     println!("\x1b[1m[tools]\x1b[0m");
     println!("  shell_enabled         = {}", config.tools.shell_enabled);
-    println!("  shell_permission      = {}", config.tools.shell_permission_level);
-    println!("  shell_timeout_secs    = {}", config.tools.shell_timeout_secs);
+    println!(
+        "  shell_permission      = {}",
+        config.tools.shell_permission_level
+    );
+    println!(
+        "  shell_timeout_secs    = {}",
+        config.tools.shell_timeout_secs
+    );
     println!("  file_access_dir       = {}", config.tools.file_access_dir);
     if !config.tools.shell_extra_allowed.is_empty() {
-        println!("  shell_extra_allowed   = {:?}", config.tools.shell_extra_allowed);
+        println!(
+            "  shell_extra_allowed   = {:?}",
+            config.tools.shell_extra_allowed
+        );
     }
     println!();
 
@@ -148,11 +178,24 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
     println!("\x1b[1m[agent]\x1b[0m");
     println!("  max_tool_rounds    = {}", config.agent.max_tool_rounds);
     println!("  llm_profile        = {}", config.agent.llm_profile);
-    println!("  fallback_profile   = {}", if config.agent.fallback_profile.is_empty() { "(none)" } else { &config.agent.fallback_profile });
-    println!("  auto_install_packages = {}", config.agent.auto_install_packages);
+    println!(
+        "  fallback_profile   = {}",
+        if config.agent.fallback_profile.is_empty() {
+            "(none)"
+        } else {
+            &config.agent.fallback_profile
+        }
+    );
+    println!(
+        "  auto_install_packages = {}",
+        config.agent.auto_install_packages
+    );
     println!("  install_scope        = {}", config.agent.install_scope);
     println!("  venv_path            = {}", config.agent.venv_path);
-    println!("  managed_python_version = {}", config.agent.managed_python_version);
+    println!(
+        "  managed_python_version = {}",
+        config.agent.managed_python_version
+    );
     println!();
 
     println!("\x1b[1m[heartbeat]\x1b[0m");
@@ -200,7 +243,10 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
             // 3. Check LLM api_key
             let key = config.llm.api_key.expose_secret();
             if !key.is_empty() || config.llm.provider == "ollama" {
-                println!("✓ LLM api_key present (or not needed for {})", config.llm.provider);
+                println!(
+                    "✓ LLM api_key present (or not needed for {})",
+                    config.llm.provider
+                );
             } else {
                 println!("✗ LLM api_key is empty — set it in config or via env var");
             }
@@ -225,7 +271,10 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
             if ws.exists() {
                 println!("✓ Workspace directory exists: {}", ws.display());
             } else {
-                println!("⚠ Workspace directory missing: {} (will be created on first run)", ws.display());
+                println!(
+                    "⚠ Workspace directory missing: {} (will be created on first run)",
+                    ws.display()
+                );
             }
 
             // 6. Check data directory
@@ -234,12 +283,18 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
                 if parent.exists() {
                     println!("✓ Data directory exists: {}", parent.display());
                 } else {
-                    println!("⚠ Data directory missing: {} (will be created on first run)", parent.display());
+                    println!(
+                        "⚠ Data directory missing: {} (will be created on first run)",
+                        parent.display()
+                    );
                 }
             }
 
             // 7. Check managed runtime configuration
-            if config.tools.shell_enabled && config.agent.auto_install_packages && config.agent.install_scope == "venv" {
+            if config.tools.shell_enabled
+                && config.agent.auto_install_packages
+                && config.agent.install_scope == "venv"
+            {
                 let venv = resolve_path(&home, &config.agent.venv_path);
                 println!(
                     "✓ Managed Python bootstrap enabled: {} (target Python {})",
@@ -249,7 +304,10 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
                 if venv.exists() {
                     println!("✓ Managed venv already exists: {}", venv.display());
                 } else {
-                    println!("ℹ Managed venv not created yet: {} (will bootstrap on first Python task)", venv.display());
+                    println!(
+                        "ℹ Managed venv not created yet: {} (will bootstrap on first Python task)",
+                        venv.display()
+                    );
                 }
             } else {
                 println!("ℹ Managed Python bootstrap is disabled");
@@ -262,12 +320,17 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
                     if parent.exists() {
                         println!("✓ App log directory exists: {}", parent.display());
                     } else {
-                        println!("⚠ App log directory missing: {} (will be created on first run)", parent.display());
+                        println!(
+                            "⚠ App log directory missing: {} (will be created on first run)",
+                            parent.display()
+                        );
                     }
                 }
                 println!("✓ App log file configured: {}", log_path.display());
             } else {
-                println!("⚠ App log file is empty — bootstrap and script logs will only appear on stderr");
+                println!(
+                    "⚠ App log file is empty — bootstrap and script logs will only appear on stderr"
+                );
             }
 
             println!();

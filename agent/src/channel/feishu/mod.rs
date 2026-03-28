@@ -44,9 +44,7 @@ impl Channel for FeishuChannel {
         &self,
         tx: mpsc::Sender<InboundMessage>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
-        Box::pin(async move {
-            ws::run_with_reconnect(&self.api, tx, &self.allow_from).await
-        })
+        Box::pin(async move { ws::run_with_reconnect(&self.api, tx, &self.allow_from).await })
     }
 
     fn send_message(
@@ -77,7 +75,7 @@ impl Channel for FeishuChannel {
             if !message_id.is_empty() {
                 // Fire-and-forget: don't fail the whole pipeline if reaction fails
                 if let Err(e) = self.api.add_reaction(&message_id, "OnIt").await {
-                    tracing::debug!(error = %e, "failed to add reaction (non-critical)");
+                    tracing::debug!(error = %e, "failed to add reaction (non-critical) / 添加表情回应失败（非关键）");
                 }
             }
             Ok(())

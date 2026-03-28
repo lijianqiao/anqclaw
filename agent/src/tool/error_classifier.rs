@@ -60,13 +60,13 @@ pub fn classify_error(
     if output.contains("ModuleNotFoundError") || output.contains("No module named") {
         let module = extract_module_name(output);
         let hint = if env.has("uv") {
-            Some(format!("You may install it: `uv pip install {module}`"))
+            Some(format!("You may install it / 可以安装: `uv pip install {module}`"))
         } else if env.has("pip3") {
-            Some(format!("You may install it: `pip3 install {module}`"))
+            Some(format!("You may install it / 可以安装: `pip3 install {module}`"))
         } else if env.has("pip") {
-            Some(format!("You may install it: `pip install {module}`"))
+            Some(format!("You may install it / 可以安装: `pip install {module}`"))
         } else {
-            Some("pip is not available. Inform the user to install the package.".into())
+            Some("pip is not available. Inform the user to install the package. / pip 不可用，请通知用户安装该包。".into())
         };
         return ErrorClassification {
             kind: ToolErrorKind::ModuleNotFound {
@@ -81,9 +81,9 @@ pub fn classify_error(
     if output.contains("Cannot find module") || output.contains("MODULE_NOT_FOUND") {
         let module = extract_node_module_name(output);
         let hint = if env.has("npm") {
-            Some(format!("You may install it: `npm install {module}`"))
+            Some(format!("You may install it / 可以安装: `npm install {module}`"))
         } else {
-            Some("npm is not available.".into())
+            Some("npm is not available. / npm 不可用。".into())
         };
         return ErrorClassification {
             kind: ToolErrorKind::ModuleNotFound {
@@ -101,7 +101,7 @@ pub fn classify_error(
     {
         return ErrorClassification {
             kind: ToolErrorKind::PermissionDenied,
-            hint: Some("Try with appropriate permissions or a different approach.".into()),
+            hint: Some("Try with appropriate permissions or a different approach. / 请尝试使用适当的权限或其他方法。".into()),
         };
     }
 
@@ -111,7 +111,7 @@ pub fn classify_error(
             kind: ToolErrorKind::SyntaxError {
                 language: "python".into(),
             },
-            hint: Some("Check the generated code for syntax issues.".into()),
+            hint: Some("Check the generated code for syntax issues. / 请检查生成的代码是否有语法问题。".into()),
         };
     }
 
@@ -119,7 +119,7 @@ pub fn classify_error(
     if output.contains("command timed out") || output.contains("timed out after") {
         return ErrorClassification {
             kind: ToolErrorKind::Timeout,
-            hint: Some("The command exceeded the timeout limit. Try a faster approach or increase the timeout.".into()),
+            hint: Some("The command exceeded the timeout limit. Try a faster approach or increase the timeout. / 命令超过超时限制。请尝试更快的方法或增加超时时间。".into()),
         };
     }
 
@@ -147,7 +147,7 @@ pub fn classify_error(
         return ErrorClassification {
             kind: ToolErrorKind::NetworkError,
             hint: Some(
-                "Check network connectivity, proxy/TLS settings, or install the dependency manually before retrying."
+                "Check network connectivity, proxy/TLS settings, or install the dependency manually before retrying. / 请检查网络连接、代理/TLS 设置，或手动安装依赖后重试。"
                     .into(),
             ),
         };
@@ -157,7 +157,7 @@ pub fn classify_error(
     if output.contains("No space left on device") || output.contains("ENOSPC") {
         return ErrorClassification {
             kind: ToolErrorKind::DiskFull,
-            hint: Some("Disk is full. Free up space before retrying.".into()),
+            hint: Some("Disk is full. Free up space before retrying. / 磁盘已满，请释放空间后重试。".into()),
         };
     }
 
@@ -294,17 +294,17 @@ fn suggest_install_command(command: &str, env: &EnvironmentProbe) -> Option<Stri
             if env.has("uv") {
                 Some("uv python install".into())
             } else {
-                Some("Install Python from https://python.org or via system package manager.".into())
+                Some("Install Python from https://python.org or via system package manager. / 请从 https://python.org 或系统包管理器安装 Python。".into())
             }
         }
         "pip3" | "pip" => {
             if env.has("python3") || env.has("python") {
                 Some("python3 -m ensurepip --upgrade".into())
             } else {
-                Some("Install Python first (pip is included).".into())
+                Some("Install Python first (pip is included). / 请先安装 Python（pip 已包含在内）。".into())
             }
         }
-        "node" | "npm" => Some("Install Node.js from https://nodejs.org".into()),
+        "node" | "npm" => Some("Install Node.js from https://nodejs.org / 请从 https://nodejs.org 安装 Node.js".into()),
         _ => None,
     }
 }

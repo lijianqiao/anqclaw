@@ -142,26 +142,26 @@ impl AuditLogger {
         let json = match serde_json::to_string(event) {
             Ok(j) => j,
             Err(e) => {
-                tracing::warn!(error = %e, "audit: failed to serialize event");
+                tracing::warn!(error = %e, "audit: failed to serialize event / 审计: 序列化事件失败");
                 return;
             }
         };
         let mut writer = match self.writer.lock() {
             Ok(w) => w,
             Err(e) => {
-                tracing::warn!(error = %e, "audit: failed to acquire writer lock");
+                tracing::warn!(error = %e, "audit: failed to acquire writer lock / 审计: 获取写入锁失败");
                 return;
             }
         };
         if let Err(e) = writeln!(writer.writer, "{json}") {
-            tracing::warn!(error = %e, "audit: failed to write event");
+            tracing::warn!(error = %e, "audit: failed to write event / 审计: 写入事件失败");
             return;
         }
 
         writer.pending_events += 1;
         if writer.pending_events >= AUDIT_FLUSH_EVERY {
             if let Err(e) = writer.writer.flush() {
-                tracing::warn!(error = %e, "audit: failed to flush writer");
+                tracing::warn!(error = %e, "audit: failed to flush writer / 审计: 刷新写入器失败");
                 return;
             }
             writer.pending_events = 0;

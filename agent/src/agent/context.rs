@@ -41,7 +41,7 @@ pub async fn build_system_prompt(
         }
         tracing::warn!(
             path = %config.agent.system_prompt_file,
-            "configured system_prompt_file not found or empty, falling back"
+            "configured system_prompt_file not found or empty, falling back / 配置的 system_prompt_file 未找到或为空，回退到默认"
         );
     }
 

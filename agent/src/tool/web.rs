@@ -51,14 +51,14 @@ impl WebFetch {
     fn check_host(&self, host: &str) -> Result<()> {
         for blocked in &self.blocked_domains {
             if host == blocked.as_str() || host.ends_with(&format!(".{blocked}")) {
-                bail!("domain `{host}` is blocked (anti-SSRF protection)");
+                bail!("domain `{host}` is blocked (anti-SSRF protection) / 域名 `{host}` 已被屏蔽（防 SSRF 保护）");
             }
         }
 
         if let Ok(ip) = host.parse::<IpAddr>()
             && Self::is_blocked_ip(ip)
         {
-            bail!("IP address `{host}` is blocked — private/reserved range (anti-SSRF)");
+            bail!("IP address `{host}` is blocked — private/reserved range (anti-SSRF) / IP 地址 `{host}` 已被屏蔽——私有/保留地址段（防 SSRF）");
         }
 
         Ok(())
@@ -67,22 +67,23 @@ impl WebFetch {
     async fn validate_url(&self, url: &Url) -> Result<()> {
         match url.scheme() {
             "http" | "https" => {}
-            scheme => bail!("unsupported URL scheme `{scheme}`"),
+            scheme => bail!("unsupported URL scheme `{scheme}` / 不支持的 URL 协议 `{scheme}`"),
         }
 
         let host = url
             .host_str()
-            .ok_or_else(|| anyhow::anyhow!("URL is missing host"))?;
+            .ok_or_else(|| anyhow::anyhow!("URL is missing host / URL 缺少主机名"))?;
         self.check_host(host)?;
 
         if host.parse::<IpAddr>().is_err() {
             let port = url
                 .port_or_known_default()
-                .ok_or_else(|| anyhow::anyhow!("cannot determine port for URL"))?;
+                .ok_or_else(|| anyhow::anyhow!("cannot determine port for URL / 无法确定 URL 的端口"))?;
             for addr in lookup_host((host, port)).await? {
                 if Self::is_blocked_ip(addr.ip()) {
                     bail!(
-                        "resolved IP `{}` for host `{host}` is blocked (anti-SSRF)",
+                        "resolved IP `{}` for host `{host}` is blocked (anti-SSRF) / 主机 `{host}` 解析的 IP `{}` 已被屏蔽（防 SSRF）",
+                        addr.ip(),
                         addr.ip()
                     );
                 }
@@ -110,12 +111,12 @@ impl WebFetch {
             if resp.status().is_redirection() {
                 redirect_count += 1;
                 if redirect_count > 5 {
-                    bail!("too many redirects while fetching URL");
+                    bail!("too many redirects while fetching URL / 获取 URL 时重定向次数过多");
                 }
                 let location = resp
                     .headers()
                     .get(LOCATION)
-                    .ok_or_else(|| anyhow::anyhow!("redirect response missing Location header"))?
+                    .ok_or_else(|| anyhow::anyhow!("redirect response missing Location header / 重定向响应缺少 Location 头"))?
                     .to_str()?;
                 current_url = current_url.join(location)?;
                 validate(current_url.clone()).await?;
@@ -125,7 +126,7 @@ impl WebFetch {
         };
 
         if !resp.status().is_success() {
-            bail!("HTTP {}: {}", resp.status(), current_url);
+            bail!("HTTP {}: {} / HTTP 请求失败 {}: {}", resp.status(), current_url, resp.status(), current_url);
         }
 
         let bytes = resp.bytes().await?;
@@ -147,7 +148,7 @@ impl WebFetch {
         let url = args
             .get("url")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing `url` parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `url` parameter / 缺少 `url` 参数"))?;
 
         let current_url = Url::parse(url)?;
 

@@ -244,13 +244,13 @@ impl ShellExec {
         }
 
         if in_single_quote || in_double_quote {
-            bail!("unclosed quote in command")
+            bail!("unclosed quote in command / 命令中有未闭合的引号")
         }
         if !current.is_empty() {
             tokens.push(current);
         }
         if tokens.is_empty() {
-            bail!("empty command")
+            bail!("empty command / 空命令")
         }
         Ok(tokens)
     }
@@ -412,9 +412,56 @@ impl ShellExec {
     fn check_blocked_dirs(&self, command: &str) -> Result<()> {
         for dir in &self.blocked_dirs {
             if command.contains(dir.as_str()) {
-                bail!("command references blocked directory: {dir}");
+                bail!("command references blocked directory: {dir} / 命令引用了被阻止的目录: {dir}");
             }
         }
+        Ok(())
+    }
+
+    /// Detect dangerous argument patterns that bypass simple token blocking.
+    /// Applies to ALL permission levels including Full.
+    fn check_dangerous_patterns(segment: &str) -> Result<()> {
+        let trimmed = segment.trim();
+        let lower = trimmed.to_lowercase();
+
+        // Fork bomb patterns
+        if lower.contains(":(){ :|:&") || lower.contains(":(){:|:&") {
+            bail!("blocked: fork bomb pattern detected / 已阻止: 检测到 fork bomb 模式");
+        }
+
+        // rm targeting root or home directory
+        let first = Self::normalize_first_token(trimmed);
+        if first == "rm" {
+            let has_recursive = lower.contains("-r") || lower.contains("--recursive");
+            let has_force = lower.contains("-f") || lower.contains("--force");
+            let targets_critical = [
+                " / ", " /\t", " ~", " /*", " /.", " /etc", " /usr", " /var", " /bin", " /sbin",
+                " /boot",
+            ]
+            .iter()
+            .any(|p| format!(" {trimmed} ").contains(p))
+                || trimmed.ends_with(" /")
+                || trimmed.ends_with(" ~");
+            if has_recursive && has_force && targets_critical {
+                bail!("blocked: destructive rm against critical directory / 已阻止: 对关键目录执行破坏性 rm 操作");
+            }
+        }
+
+        // chmod/chown on root
+        if (first == "chmod" || first == "chown")
+            && (lower.contains(" / ") || lower.ends_with(" /") || lower.contains(" /*"))
+        {
+            bail!("blocked: {first} on root directory / 已阻止: 对根目录执行 {first}");
+        }
+
+        // Direct write to block devices
+        if lower.contains("> /dev/sd")
+            || lower.contains("> /dev/nvme")
+            || lower.contains("> /dev/hd")
+        {
+            bail!("blocked: direct write to block device / 已阻止: 直接写入块设备");
+        }
+
         Ok(())
     }
 
@@ -426,18 +473,22 @@ impl ShellExec {
 
             // Check blocked commands (applies to ALL modes)
             if self.blocked.contains(first_token) {
-                bail!("command `{first_token}` is blocked for safety reasons");
+                bail!("command `{first_token}` is blocked for safety reasons / 命令 `{first_token}` 因安全原因被阻止");
             }
 
             // Check if the segment starts with any blocked pattern
             for blocked in &self.blocked {
                 if segment.starts_with(blocked.as_str()) {
-                    bail!("command pattern `{blocked}` is blocked for safety reasons");
+                    bail!("command pattern `{blocked}` is blocked for safety reasons / 命令模式 `{blocked}` 因安全原因被阻止");
                 }
             }
 
+            // Check dangerous argument patterns (applies to ALL modes)
+            Self::check_dangerous_patterns(segment)?;
+
             // Permission check — per-segment, not whole command
-            let in_trusted = !self.trusted_dirs.is_empty() && self.segment_uses_trusted_dir(segment);
+            let in_trusted =
+                !self.trusted_dirs.is_empty() && self.segment_uses_trusted_dir(segment);
 
             match self.permission_level {
                 PermissionLevel::Readonly | PermissionLevel::Supervised => {
@@ -446,7 +497,9 @@ impl ShellExec {
                         && !self.is_managed_runtime_command(first_token)
                     {
                         bail!(
-                            "command `{first_token}` is not allowed in {:?} mode. Allowed: {:?}",
+                            "command `{first_token}` is not allowed in {:?} mode. Allowed: {:?} / 命令 `{first_token}` 在 {:?} 模式下不被允许。允许的命令: {:?}",
+                            self.permission_level,
+                            self.allowed,
                             self.permission_level,
                             self.allowed
                         );
@@ -535,13 +588,13 @@ impl ShellExec {
                         exit_code = ?output.status.code(),
                         stdout_preview = %Self::preview_for_log(&stdout),
                         stderr_preview = %Self::preview_for_log(&stderr),
-                        "managed runtime: uv installer failed"
+                        "managed runtime: uv installer failed / 托管运行时: uv 安装器失败"
                     );
-                    bail!("failed to install uv automatically via PowerShell installer")
+                    bail!("failed to install uv automatically via PowerShell installer / 通过 PowerShell 安装器自动安装 uv 失败")
                 }
                 Err(error) => {
-                    tracing::warn!(error = %error, "managed runtime: failed to launch uv installer");
-                    bail!("failed to install uv automatically via PowerShell installer")
+                    tracing::warn!(error = %error, "managed runtime: failed to launch uv installer / 托管运行时: 启动 uv 安装器失败");
+                    bail!("failed to install uv automatically via PowerShell installer / 通过 PowerShell 安装器自动安装 uv 失败")
                 }
             }
         }
@@ -570,19 +623,19 @@ impl ShellExec {
                         exit_code = ?output.status.code(),
                         stdout_preview = %Self::preview_for_log(&stdout),
                         stderr_preview = %Self::preview_for_log(&stderr),
-                        "managed runtime: uv installer failed"
+                        "managed runtime: uv installer failed / 托管运行时: uv 安装器失败"
                     );
-                    bail!("failed to install uv automatically; curl or wget is required")
+                    bail!("failed to install uv automatically; curl or wget is required / 自动安装 uv 失败；需要 curl 或 wget")
                 }
                 Err(error) => {
-                    tracing::warn!(error = %error, "managed runtime: failed to launch uv installer");
-                    bail!("failed to install uv automatically; curl or wget is required")
+                    tracing::warn!(error = %error, "managed runtime: failed to launch uv installer / 托管运行时: 启动 uv 安装器失败");
+                    bail!("failed to install uv automatically; curl or wget is required / 自动安装 uv 失败；需要 curl 或 wget")
                 }
             }
         }
 
         Self::existing_uv_path().ok_or_else(|| {
-            anyhow::anyhow!("uv installer completed but uv binary is still unavailable")
+            anyhow::anyhow!("uv installer completed but uv binary is still unavailable / uv 安装器已完成但 uv 二进制文件仍不可用")
         })
     }
 
@@ -609,7 +662,7 @@ impl ShellExec {
 
     fn ensure_managed_python_runtime_blocking(&self) -> Result<PathBuf> {
         let Some(venv_abs) = self.managed_venv_path() else {
-            bail!("managed Python runtime requested without a configured venv path")
+            bail!("managed Python runtime requested without a configured venv path / 请求托管 Python 运行时但未配置 venv 路径")
         };
 
         let python_bin = Self::managed_python_binary(&venv_abs);
@@ -647,13 +700,13 @@ impl ShellExec {
                     exit_code = ?output.status.code(),
                     stdout_preview = %Self::preview_for_log(&stdout),
                     stderr_preview = %Self::preview_for_log(&stderr),
-                    "managed runtime: Python installation step failed"
+                    "managed runtime: Python installation step failed / 托管运行时: Python 安装步骤失败"
                 );
-                bail!("failed to install managed Python {} with uv", version)
+                bail!("failed to install managed Python {} with uv / 使用 uv 安装托管 Python {} 失败", version, version)
             }
             Err(error) => {
-                tracing::warn!(error = %error, python = %version, "managed runtime: failed to launch `uv python install`");
-                bail!("failed to install managed Python {} with uv", version)
+                tracing::warn!(error = %error, python = %version, "managed runtime: failed to launch `uv python install` / 托管运行时: 启动 `uv python install` 失败");
+                bail!("failed to install managed Python {} with uv / 使用 uv 安装托管 Python {} 失败", version, version)
             }
         }
 
@@ -679,19 +732,20 @@ impl ShellExec {
                     exit_code = ?output.status.code(),
                     stdout_preview = %Self::preview_for_log(&stdout),
                     stderr_preview = %Self::preview_for_log(&stderr),
-                    "managed runtime: venv creation step failed"
+                    "managed runtime: venv creation step failed / 托管运行时: venv 创建步骤失败"
                 );
-                bail!("failed to create managed venv at {}", venv_abs.display())
+                bail!("failed to create managed venv at {} / 在 {} 创建托管 venv 失败", venv_abs.display(), venv_abs.display())
             }
             Err(error) => {
-                tracing::warn!(error = %error, venv = %venv_abs.display(), "managed runtime: failed to launch `uv venv`");
-                bail!("failed to create managed venv at {}", venv_abs.display())
+                tracing::warn!(error = %error, venv = %venv_abs.display(), "managed runtime: failed to launch `uv venv` / 托管运行时: 启动 `uv venv` 失败");
+                bail!("failed to create managed venv at {} / 在 {} 创建托管 venv 失败", venv_abs.display(), venv_abs.display())
             }
         }
 
         if !python_bin.exists() {
             bail!(
-                "managed Python bootstrap finished but interpreter is missing at {}",
+                "managed Python bootstrap finished but interpreter is missing at {} / 托管 Python 引导完成但解释器在 {} 处缺失",
+                python_bin.display(),
                 python_bin.display()
             )
         }
@@ -704,7 +758,7 @@ impl ShellExec {
         let shell = self.clone();
         tokio::task::spawn_blocking(move || shell.ensure_managed_python_runtime_blocking())
             .await
-            .map_err(|error| anyhow::anyhow!("managed runtime bootstrap task failed: {error}"))?
+            .map_err(|error| anyhow::anyhow!("managed runtime bootstrap task failed: {error} / 托管运行时引导任务失败: {error}"))?
     }
 
     /// Rewrite a command to run inside the venv if it's a pip/uv install or
@@ -781,7 +835,7 @@ impl ShellExec {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing `command` parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `command` parameter / 缺少 `command` 参数"))?;
 
         // Check all sub-commands in the chain (pipes, &&, || etc.)
         self.check_command_chain(command)?;
@@ -881,7 +935,7 @@ impl ShellExec {
                         stdout_bytes = stdout.len(),
                         stderr_bytes = stderr.len(),
                         stderr_preview = %Self::preview_for_log(&stderr),
-                        "shell: command finished with non-zero exit"
+                        "shell: command finished with non-zero exit / shell: 命令以非零退出码结束"
                     );
                 }
                 let mut result = format!("[exit code: {exit_code}]\n");
@@ -894,12 +948,12 @@ impl ShellExec {
                 Ok(result)
             }
             Ok(Err(e)) => {
-                tracing::warn!(command = %command, managed_runtime, error = %e, "shell: command execution failed");
-                bail!("failed to run command: {e}")
+                tracing::warn!(command = %command, managed_runtime, error = %e, "shell: command execution failed / shell: 命令执行失败");
+                bail!("failed to run command: {e} / 运行命令失败: {e}")
             }
             Err(_) => {
-                tracing::warn!(command = %command, managed_runtime, timeout_secs = timeout.as_secs(), "shell: command timed out");
-                bail!("command timed out after {:?}", timeout)
+                tracing::warn!(command = %command, managed_runtime, timeout_secs = timeout.as_secs(), "shell: command timed out / shell: 命令超时");
+                bail!("command timed out after {:?} / 命令在 {:?} 后超时", timeout, timeout)
             }
         }
     }
@@ -1243,8 +1297,12 @@ mod tests {
             None,
         );
 
-        assert!(shell.segment_uses_trusted_dir(&format!("cat {}", trusted.join("a.txt").display())));
-        assert!(!shell.segment_uses_trusted_dir(&format!("cat {}", sibling.join("a.txt").display())));
+        assert!(
+            shell.segment_uses_trusted_dir(&format!("cat {}", trusted.join("a.txt").display()))
+        );
+        assert!(
+            !shell.segment_uses_trusted_dir(&format!("cat {}", sibling.join("a.txt").display()))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

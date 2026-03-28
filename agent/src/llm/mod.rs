@@ -70,7 +70,7 @@ pub fn create_llm_client(config: &LlmSection) -> Result<Arc<dyn LlmClient>> {
         "openai_compat" | "openai" | "deepseek" | "qwen" | "ollama" | "gemini" | "mimo"
         | "openrouter" => Arc::new(openai_compat::OpenAiCompatClient::new(config)?),
         other => anyhow::bail!(
-            "Unknown LLM provider: `{other}`. Supported: anthropic, openai_compat, openai, \
+            "Unknown LLM provider: `{other}` / 未知的 LLM 提供者: `{other}`. Supported: anthropic, openai_compat, openai, \
              deepseek, qwen, ollama, gemini, mimo, openrouter"
         ),
     };

@@ -5,10 +5,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
-use axum::Router;
 use dashmap::DashMap;
 use tower::ServiceExt;
 
@@ -96,10 +96,9 @@ async fn test_lru_dedup_concurrent() {
     use lru::LruCache;
     use std::num::NonZero;
 
-    let cache: Arc<tokio::sync::Mutex<LruCache<String, ()>>> =
-        Arc::new(tokio::sync::Mutex::new(LruCache::new(
-            NonZero::new(100).expect("100 is non-zero"),
-        )));
+    let cache: Arc<tokio::sync::Mutex<LruCache<String, ()>>> = Arc::new(tokio::sync::Mutex::new(
+        LruCache::new(NonZero::new(100).expect("100 is non-zero")),
+    ));
 
     let mut handles = Vec::new();
     let duplicates = Arc::new(std::sync::atomic::AtomicU32::new(0));

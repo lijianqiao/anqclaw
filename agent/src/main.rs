@@ -168,19 +168,19 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
     // Find and load configuration
     let config_path = find_config(cli_config.as_deref()).ok_or_else(|| {
         anyhow::anyhow!(
-            "No config file found. Searched:\n  \
+            "No config file found / 未找到配置文件. Searched:\n  \
              1. --config <path>\n  \
              2. $ANQCLAW_CONFIG\n  \
              3. ./config.toml\n  \
              4. {}\n\n\
-             Run `anqclaw onboard` to create one.",
+             Run `anqclaw onboard` to create one. / 运行 `anqclaw onboard` 创建配置文件。",
             home.join("config.toml").display()
         )
     })?;
 
     let config_str = config_path.to_str().ok_or_else(|| {
         anyhow::anyhow!(
-            "config path contains invalid UTF-8: {}",
+            "config path contains invalid UTF-8 / 配置路径包含无效 UTF-8: {}",
             config_path.display()
         )
     })?;
@@ -239,14 +239,14 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
         name = config.app.name.as_str(),
         home = %home.display(),
         config = %config_path.display(),
-        "anqclaw starting"
+        "anqclaw starting / anqclaw 启动中"
     );
 
     // Initialize MemoryStore
     let memory = Arc::new(MemoryStore::new(&config.memory.db_path).await?);
     tracing::info!(
         db = config.memory.db_path.as_str(),
-        "memory store initialized"
+        "memory store initialized / 内存存储已初始化"
     );
 
     // Create LLM client
@@ -254,7 +254,7 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
     tracing::info!(
         provider = config.llm.provider.as_str(),
         model = config.llm.model.as_str(),
-        "LLM client created"
+        "LLM client created / LLM 客户端已创建"
     );
 
     // Create fallback LLM client if configured
@@ -264,7 +264,7 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
         } else {
             tracing::warn!(
                 profile = config.agent.fallback_profile.as_str(),
-                "fallback LLM profile not found, ignoring"
+                "fallback LLM profile not found, ignoring / 备用 LLM 配置未找到，已忽略"
             );
             None
         }
@@ -279,11 +279,11 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
             .into_owned();
         match audit::AuditLogger::new(&audit_path) {
             Ok(logger) => {
-                tracing::info!(path = audit_path.as_str(), "audit logging enabled");
+                tracing::info!(path = audit_path.as_str(), "audit logging enabled / 审计日志已启用");
                 Some(Arc::new(logger))
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to initialize audit logger, continuing without");
+                tracing::warn!(error = %e, "failed to initialize audit logger, continuing without / 审计日志初始化失败，继续运行");
                 None
             }
         }
@@ -298,11 +298,11 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
         tracing::info!(
             dir = %skills_dir.display(),
             count = registry.list().len(),
-            "skills scanned"
+            "skills scanned / 技能已扫描"
         );
         Some(registry)
     } else {
-        tracing::info!("skills disabled");
+        tracing::info!("skills disabled / 技能已禁用");
         None
     };
 
@@ -317,15 +317,18 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
         llm_profile_names,
         Some(&config.skills),
     ));
-    let agent = Arc::new(AgentCore::new(
-        llm,
-        fallback_llm,
-        tools,
-        memory.clone(),
-        config.clone(),
-        audit_logger,
-        skill_registry.clone(),
-    ).await);
+    let agent = Arc::new(
+        AgentCore::new(
+            llm,
+            fallback_llm,
+            tools,
+            memory.clone(),
+            config.clone(),
+            audit_logger,
+            skill_registry.clone(),
+        )
+        .await,
+    );
 
     Ok(Bootstrap {
         config,
@@ -346,12 +349,12 @@ where
     ensure_dirs(&home)?;
 
     let config_path = find_config(cli_config.as_deref()).ok_or_else(|| {
-        anyhow::anyhow!("No config file found. Run `anqclaw onboard` to create one.")
+        anyhow::anyhow!("No config file found / 未找到配置文件. Run `anqclaw onboard` to create one. / 运行 `anqclaw onboard` 创建配置文件。")
     })?;
 
     let config_str = config_path.to_str().ok_or_else(|| {
         anyhow::anyhow!(
-            "config path contains invalid UTF-8: {}",
+            "config path contains invalid UTF-8 / 配置路径包含无效 UTF-8: {}",
             config_path.display()
         )
     })?;
@@ -378,11 +381,11 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
     let _skill_watcher = if let Some(ref registry) = bs.skill_registry {
         match skill::spawn_skill_watcher(registry.clone()) {
             Ok(w) => {
-                tracing::info!("skills hot-reload watcher started");
+                tracing::info!("skills hot-reload watcher started / 技能热重载监视器已启动");
                 Some(w)
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to start skills hot-reload watcher");
+                tracing::warn!(error = %e, "failed to start skills hot-reload watcher / 技能热重载监视器启动失败");
                 None
             }
         }
@@ -393,9 +396,9 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
     if let Some(ref feishu_cfg) = bs.config.feishu {
         let feishu_channel: Arc<dyn Channel> = Arc::new(FeishuChannel::new(feishu_cfg)?);
         channels.push(feishu_channel);
-        tracing::info!("feishu channel enabled");
+        tracing::info!("feishu channel enabled / 飞书频道已启用");
     } else {
-        tracing::info!("feishu channel not configured — skipping");
+        tracing::info!("feishu channel not configured, skipping / 飞书频道未配置，已跳过");
     }
 
     // Create & spawn Gateway
@@ -411,11 +414,11 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
             Some(app_metrics.clone()),
         ));
         channels.push(http_channel);
-        tracing::info!(bind = %bs.config.http_channel.bind, "http channel enabled");
+        tracing::info!(bind = %bs.config.http_channel.bind, "http channel enabled / HTTP 频道已启用");
     }
 
     if channels.is_empty() {
-        tracing::warn!("no channels configured — only heartbeat/scheduler will run (if enabled)");
+        tracing::warn!("no channels configured, only heartbeat/scheduler will run (if enabled) / 未配置频道，仅心跳/调度器运行（如已启用）");
     }
 
     let gateway = Gateway::new(
@@ -428,7 +431,7 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
     let gw = gateway.clone();
     let gateway_handle = tokio::spawn(async move {
         if let Err(e) = gw.run().await {
-            tracing::error!(error = %e, "gateway exited with error");
+            tracing::error!(error = %e, "gateway exited with error / 网关退出并出错");
         }
     });
 
@@ -443,15 +446,15 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
         );
         tracing::info!(
             interval_mins = bs.config.heartbeat.interval_minutes,
-            "heartbeat enabled"
+            "heartbeat enabled / 心跳已启用"
         );
         Some(tokio::spawn(async move {
             if let Err(e) = hb.run().await {
-                tracing::error!(error = %e, "heartbeat exited with error");
+                tracing::error!(error = %e, "heartbeat exited with error / 心跳退出并出错");
             }
         }))
     } else {
-        tracing::info!("heartbeat disabled");
+        tracing::info!("heartbeat disabled / 心跳已禁用");
         None
     };
 
@@ -464,22 +467,22 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
             channels.clone(),
             &bs.home,
         );
-        tracing::info!(task_count = sched.task_count(), "scheduler enabled");
+        tracing::info!(task_count = sched.task_count(), "scheduler enabled / 调度器已启用");
         Some(tokio::spawn(async move {
             if let Err(e) = sched.run().await {
-                tracing::error!(error = %e, "scheduler exited with error");
+                tracing::error!(error = %e, "scheduler exited with error / 调度器退出并出错");
             }
         }))
     } else {
-        tracing::info!("scheduler disabled");
+        tracing::info!("scheduler disabled / 调度器已禁用");
         None
     };
 
-    tracing::info!("anqclaw serve started — press Ctrl+C to stop");
+    tracing::info!("anqclaw serve started, press Ctrl+C to stop / anqclaw 服务已启动，按 Ctrl+C 停止");
 
     // Wait for shutdown
     tokio::signal::ctrl_c().await?;
-    tracing::info!("shutdown signal received, stopping...");
+    tracing::info!("shutdown signal received, stopping / 收到关闭信号，正在停止...");
 
     gateway_handle.abort();
     if let Some(hb) = heartbeat_handle {
@@ -489,7 +492,7 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
         sh.abort();
     }
 
-    tracing::info!("waiting for in-flight tasks to finish (max 30s)...");
+    tracing::info!("waiting for in-flight tasks to finish (max 30s) / 等待进行中的任务完成（最多 30 秒）...");
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::time::sleep(std::time::Duration::from_millis(500)),
@@ -497,7 +500,7 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
     .await;
 
     bs.memory.close().await;
-    tracing::info!("anqclaw stopped — goodbye!");
+    tracing::info!("anqclaw stopped, goodbye / anqclaw 已停止，再见!");
     Ok(())
 }
 
@@ -530,11 +533,11 @@ async fn run_chat(cli_config: Option<String>, message: Option<String>) -> anyhow
         tokio::select! {
             result = handle => {
                 if let Err(e) = result {
-                    tracing::error!(error = %e, "gateway error");
+                    tracing::error!(error = %e, "gateway error / 网关错误");
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("interrupted");
+                tracing::info!("interrupted / 已中断");
             }
         }
     } else {
@@ -547,7 +550,7 @@ async fn run_chat(cli_config: Option<String>, message: Option<String>) -> anyhow
         tokio::select! {
             result = handle => {
                 if let Err(e) = result {
-                    tracing::error!(error = %e, "gateway error");
+                    tracing::error!(error = %e, "gateway error / 网关错误");
                 }
             }
             _ = tokio::signal::ctrl_c() => {

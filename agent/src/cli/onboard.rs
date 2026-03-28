@@ -266,9 +266,7 @@ fn generate_config(
     s.push('\n');
     s.push_str("# supervised 模式下允许执行的命令（基础白名单）\n");
     s.push_str("# 网络访问默认统一收敛到 web_fetch，而不是直接开放 curl/wget\n");
-    s.push_str(
-        "shell_allowed_commands = [\"ls\", \"cat\", \"grep\", \"find\", \"date\"]\n",
-    );
+    s.push_str("shell_allowed_commands = [\"ls\", \"cat\", \"grep\", \"find\", \"date\"]\n");
     s.push_str("# 额外允许的命令（追加到上面的白名单之后）\n");
     s.push_str("# Python 运行时命令默认放开，配合 auto_install_packages 可自动自举工作区 .venv\n");
     s.push_str("shell_extra_allowed = [\"python\", \"python3\", \"pip\", \"pip3\", \"uv\"]\n");

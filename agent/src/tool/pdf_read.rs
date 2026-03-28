@@ -47,7 +47,7 @@ impl PdfRead {
         let path_str = args
             .get("path")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing `path` parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `path` parameter / 缺少 `path` 参数"))?;
 
         #[allow(unused_variables)]
         let max_chars = args
@@ -77,7 +77,7 @@ impl PdfRead {
         // File size check
         let metadata = tokio::fs::metadata(&path)
             .await
-            .map_err(|e| anyhow::anyhow!("stat `{}`: {e}", path.display()))?;
+            .map_err(|e| anyhow::anyhow!("stat `{}`: {e} / 获取文件信息失败", path.display()))?;
         if metadata.len() > MAX_PDF_SIZE {
             return Ok(format!(
                 "[PDF 过大: {} bytes ({:.1} MB), 最大允许 50 MB]",
@@ -89,9 +89,12 @@ impl PdfRead {
         // Verify it's actually a PDF
         let header = tokio::fs::read(&path)
             .await
-            .map_err(|e| anyhow::anyhow!("read `{}`: {e}", path.display()))?;
+            .map_err(|e| anyhow::anyhow!("read `{}`: {e} / 读取文件失败", path.display()))?;
         if !header.starts_with(b"%PDF-") {
-            anyhow::bail!("file `{}` is not a valid PDF (missing %PDF- header)", path.display());
+            anyhow::bail!(
+                "file `{}` is not a valid PDF (missing %PDF- header) / 文件不是有效的 PDF（缺少 %PDF- 头）",
+                path.display()
+            );
         }
 
         // Extract text using pdf_extract (CPU-intensive, use spawn_blocking)
@@ -100,15 +103,17 @@ impl PdfRead {
             let path_clone = path.clone();
             let text = tokio::task::spawn_blocking(move || -> Result<String> {
                 let bytes = std::fs::read(&path_clone)
-                    .map_err(|e| anyhow::anyhow!("read `{}`: {e}", path_clone.display()))?;
+                    .map_err(|e| anyhow::anyhow!("read `{}`: {e} / 读取文件失败", path_clone.display()))?;
                 pdf_extract::extract_text_from_mem(&bytes)
-                    .map_err(|e| anyhow::anyhow!("PDF extraction failed: {e}"))
+                    .map_err(|e| anyhow::anyhow!("PDF extraction failed / PDF 提取失败: {e}"))
             })
             .await
-            .map_err(|e| anyhow::anyhow!("spawn_blocking failed: {e}"))??;
+            .map_err(|e| anyhow::anyhow!("spawn_blocking failed / 后台任务失败: {e}"))??;
 
             if text.trim().is_empty() {
-                return Ok("[PDF 提取完成，但未包含可提取的文本内容（可能是扫描件/图片 PDF）]".to_string());
+                return Ok(
+                    "[PDF 提取完成，但未包含可提取的文本内容（可能是扫描件/图片 PDF）]".to_string(),
+                );
             }
 
             if text.len() > max_chars {

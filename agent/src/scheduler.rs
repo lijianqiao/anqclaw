@@ -49,7 +49,7 @@ impl Scheduler {
 
         for cfg in tasks {
             if !cfg.enabled {
-                tracing::info!(name = %cfg.name, "scheduler: task disabled, skipping");
+                tracing::info!(name = %cfg.name, "scheduler: task disabled, skipping / 调度器: 任务已禁用，已跳过");
                 continue;
             }
 
@@ -66,7 +66,7 @@ impl Scheduler {
                     tracing::info!(
                         name = %cfg.name,
                         cron = %cfg.cron,
-                        "scheduler: task registered"
+                        "scheduler: task registered / 调度器: 任务已注册"
                     );
                     scheduled.push(ScheduledTask {
                         config: resolved_cfg,
@@ -78,7 +78,7 @@ impl Scheduler {
                         name = %cfg.name,
                         cron = %cfg.cron,
                         error = %e,
-                        "scheduler: invalid cron expression, skipping task"
+                        "scheduler: invalid cron expression, skipping task / 调度器: 无效的 cron 表达式，已跳过任务"
                     );
                 }
             }
@@ -100,11 +100,11 @@ impl Scheduler {
     /// whose next fire time has passed.
     pub async fn run(&self) -> anyhow::Result<()> {
         if self.tasks.is_empty() {
-            tracing::info!("scheduler: no tasks registered, exiting");
+            tracing::info!("scheduler: no tasks registered, exiting / 调度器: 无注册任务，退出");
             return Ok(());
         }
 
-        tracing::info!(count = self.tasks.len(), "scheduler: started");
+        tracing::info!(count = self.tasks.len(), "scheduler: started / 调度器: 已启动");
 
         // Track last-fired time for each task to prevent double-firing
         let mut last_fired: Vec<chrono::DateTime<Utc>> = vec![Utc::now(); self.tasks.len()];
@@ -135,13 +135,13 @@ impl Scheduler {
             _ => {
                 tracing::debug!(
                     name = %task.config.name,
-                    "scheduler: prompt empty or missing, skipping"
+                    "scheduler: prompt empty or missing, skipping / 调度器: 提示词为空或缺失，已跳过"
                 );
                 return;
             }
         };
 
-        tracing::info!(name = %task.config.name, "scheduler: running task");
+        tracing::info!(name = %task.config.name, "scheduler: running task / 调度器: 正在执行任务");
 
         let chat_id = format!("__scheduler__{}", task.config.name);
         let msg = InboundMessage {
@@ -171,7 +171,7 @@ impl Scheduler {
             tracing::error!(
                 name = %task.config.name,
                 error = %e,
-                "scheduler: failed to save conversation"
+                "scheduler: failed to save conversation / 调度器: 保存对话失败"
             );
         }
 
@@ -179,7 +179,7 @@ impl Scheduler {
         if reply.content.contains("HEARTBEAT_OK") {
             tracing::debug!(
                 name = %task.config.name,
-                "scheduler: HEARTBEAT_OK — no notification"
+                "scheduler: HEARTBEAT_OK, no notification / 调度器: HEARTBEAT_OK，无需通知"
             );
             return;
         }
@@ -188,7 +188,7 @@ impl Scheduler {
         if task.config.notify_chat_id.is_empty() {
             tracing::debug!(
                 name = %task.config.name,
-                "scheduler: no notify_chat_id configured, skipping notification"
+                "scheduler: no notify_chat_id configured, skipping notification / 调度器: 未配置 notify_chat_id，已跳过通知"
             );
             return;
         }
@@ -206,14 +206,14 @@ impl Scheduler {
                     name = %task.config.name,
                     channel = %task.config.notify_channel,
                     error = %e,
-                    "scheduler: failed to send notification"
+                    "scheduler: failed to send notification / 调度器: 发送通知失败"
                 );
             }
         } else {
             tracing::warn!(
                 name = %task.config.name,
                 channel = %task.config.notify_channel,
-                "scheduler: no matching channel for notification"
+                "scheduler: no matching channel for notification / 调度器: 未找到匹配的通知频道"
             );
         }
     }
@@ -229,7 +229,7 @@ impl Scheduler {
                         name = %config.name,
                         path = %config.prompt_file,
                         error = %e,
-                        "scheduler: prompt_file read failed, trying inline prompt"
+                        "scheduler: prompt_file read failed, trying inline prompt / 调度器: 提示词文件读取失败，尝试内联提示词"
                     );
                 }
             }

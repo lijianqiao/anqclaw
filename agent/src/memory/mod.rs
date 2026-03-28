@@ -71,11 +71,11 @@ impl MemoryStore {
         {
             tokio::fs::create_dir_all(parent)
                 .await
-                .with_context(|| format!("create db directory: {}", parent.display()))?;
+                .with_context(|| format!("create db directory: {} / 创建数据库目录: {}", parent.display(), parent.display()))?;
         }
 
         let opts = SqliteConnectOptions::from_str(db_path)
-            .with_context(|| format!("parse SQLite path: {db_path}"))?
+            .with_context(|| format!("parse SQLite path: {db_path} / 解析 SQLite 路径: {db_path}"))?
             .create_if_missing(true)
             // WAL mode: concurrent reads + writes, better performance
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
@@ -84,14 +84,14 @@ impl MemoryStore {
 
         let pool = SqlitePool::connect_with(opts)
             .await
-            .with_context(|| format!("connect to SQLite: {db_path}"))?;
+            .with_context(|| format!("connect to SQLite: {db_path} / 连接 SQLite: {db_path}"))?;
 
         // Run schema (embedded at compile time — no runtime file I/O needed)
         let schema = include_str!("schema.sql");
         sqlx::raw_sql(schema)
             .execute(&pool)
             .await
-            .context("execute schema.sql")?;
+            .context("execute schema.sql / 执行 schema.sql")?;
 
         let store = Self { pool };
         store.initialise_memories().await?;
@@ -111,16 +111,20 @@ impl MemoryStore {
         .bind(table_name)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| format!("check table exists: {table_name}"))?;
+        .with_context(|| format!("check table exists: {table_name} / 检查表是否存在: {table_name}"))?;
         Ok(row.is_some())
     }
 
     async fn count_rows(&self, table_name: &str) -> Result<i64> {
+        const ALLOWED: &[&str] = &["messages", "memories", "memories_data", "memories_fts"];
+        if !ALLOWED.contains(&table_name) {
+            anyhow::bail!("count_rows: invalid table name '{table_name}' / count_rows: 无效表名 '{table_name}'");
+        }
         let sql = format!("SELECT COUNT(*) AS count FROM {table_name}");
         let row = sqlx::query(&sql)
             .fetch_one(&self.pool)
             .await
-            .with_context(|| format!("count rows in {table_name}"))?;
+            .with_context(|| format!("count rows in {table_name} / 统计 {table_name} 行数"))?;
         Ok(row.get::<i64, _>("count"))
     }
 
@@ -135,7 +139,7 @@ impl MemoryStore {
         let rows = sqlx::query("SELECT key, content, tags, created_at FROM memories")
             .fetch_all(&self.pool)
             .await
-            .context("load legacy memories from FTS table")?;
+            .context("load legacy memories from FTS table / 从 FTS 表加载旧版记忆")?;
 
         if rows.is_empty() {
             return Ok(());
@@ -145,7 +149,7 @@ impl MemoryStore {
             .pool
             .begin()
             .await
-            .context("begin legacy memory migration")?;
+            .context("begin legacy memory migration / 开始旧版记忆迁移")?;
         for row in rows {
             sqlx::query(
                 r#"
@@ -163,11 +167,11 @@ impl MemoryStore {
             .bind(row.get::<i64, _>("created_at"))
             .execute(&mut *tx)
             .await
-            .context("migrate legacy memory row")?;
+            .context("migrate legacy memory row / 迁移旧版记忆行")?;
         }
         tx.commit()
             .await
-            .context("commit legacy memory migration")?;
+            .context("commit legacy memory migration / 提交旧版记忆迁移")?;
         Ok(())
     }
 
@@ -181,7 +185,7 @@ impl MemoryStore {
         sqlx::query("INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')")
             .execute(&self.pool)
             .await
-            .context("rebuild memories_fts index")?;
+            .context("rebuild memories_fts index / 重建 memories_fts 索引")?;
         Ok(())
     }
 
@@ -192,13 +196,13 @@ impl MemoryStore {
     /// `tool_calls` is JSON-serialised; all other fields map 1-to-1.
     pub async fn save_conversation(&self, chat_id: &str, messages: &[ChatMessage]) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
-        let mut tx = self.pool.begin().await.context("begin transaction")?;
+        let mut tx = self.pool.begin().await.context("begin transaction / 开始事务")?;
 
         for msg in messages {
             let role = role_to_str(&msg.role);
             let tool_calls_json = match &msg.tool_calls {
                 Some(calls) if !calls.is_empty() => {
-                    Some(serde_json::to_string(calls).context("serialise tool_calls")?)
+                    Some(serde_json::to_string(calls).context("serialise tool_calls / 序列化 tool_calls")?)
                 }
                 _ => None,
             };
@@ -217,10 +221,10 @@ impl MemoryStore {
             .bind(now)
             .execute(&mut *tx)
             .await
-            .context("insert message")?;
+            .context("insert message / 插入消息")?;
         }
 
-        tx.commit().await.context("commit transaction")
+        tx.commit().await.context("commit transaction / 提交事务")
     }
 
     /// Returns the most recent `limit` messages for `chat_id`, ordered oldest-first.
@@ -240,7 +244,7 @@ impl MemoryStore {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .context("fetch history")?;
+        .context("fetch history / 获取历史记录")?;
 
         let mut messages: Vec<ChatMessage> = rows
             .into_iter()
@@ -293,7 +297,7 @@ impl MemoryStore {
         .bind(created_at)
         .execute(&self.pool)
         .await
-        .context("insert memory")?;
+        .context("insert memory / 插入记忆")?;
 
         Ok(())
     }
@@ -321,7 +325,7 @@ impl MemoryStore {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .context("fts5 search")?;
+        .context("fts5 search / FTS5 搜索")?;
 
         Ok(rows
             .into_iter()
@@ -348,7 +352,7 @@ impl MemoryStore {
         )
         .fetch_all(&self.pool)
         .await
-        .context("list sessions")?;
+        .context("list sessions / 列出会话")?;
 
         Ok(rows
             .into_iter()
@@ -366,7 +370,7 @@ impl MemoryStore {
             .bind(chat_id)
             .execute(&self.pool)
             .await
-            .context("delete session")?;
+            .context("delete session / 删除会话")?;
         Ok(result.rows_affected())
     }
 
@@ -385,7 +389,7 @@ impl MemoryStore {
         .bind(before_ts)
         .execute(&self.pool)
         .await
-        .context("delete old sessions")?;
+        .context("delete old sessions / 删除旧会话")?;
         Ok(result.rows_affected())
     }
 
@@ -402,7 +406,7 @@ impl MemoryStore {
         .bind(chat_id)
         .fetch_all(&self.pool)
         .await
-        .context("export session")?;
+        .context("export session / 导出会话")?;
 
         let messages: Vec<ExportedMessage> = rows
             .into_iter()
@@ -428,7 +432,7 @@ impl MemoryStore {
     /// Imports a `SessionExport` into the database.
     /// Uses the chat_id from the export payload.
     pub async fn import_session(&self, export: &SessionExport) -> Result<()> {
-        let mut tx = self.pool.begin().await.context("begin transaction")?;
+        let mut tx = self.pool.begin().await.context("begin transaction / 开始事务")?;
 
         for msg in &export.messages {
             let tool_calls_str = msg.tool_calls.as_ref().map(|v| v.to_string());
@@ -447,10 +451,10 @@ impl MemoryStore {
             .bind(msg.created_at)
             .execute(&mut *tx)
             .await
-            .context("import message")?;
+            .context("import message / 导入消息")?;
         }
 
-        tx.commit().await.context("commit import")
+        tx.commit().await.context("commit import / 提交导入")
     }
 
     /// Closes the SQLite connection pool, flushing pending writes.
@@ -477,7 +481,7 @@ fn str_to_role(s: &str) -> Role {
         "assistant" => Role::Assistant,
         "tool" => Role::Tool,
         other => {
-            tracing::warn!(role = other, "unknown role in DB, defaulting to User");
+            tracing::warn!(role = other, "unknown role in DB, defaulting to User / 数据库中未知角色，默认为 User");
             Role::User
         }
     }

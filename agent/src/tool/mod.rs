@@ -157,7 +157,7 @@ impl ToolRegistry {
                     tools.insert(t.name().to_string(), Arc::new(t));
                 }
                 Err(error) => {
-                    tracing::warn!(tool = custom_config.name.as_str(), error = %error, "skipping invalid custom tool configuration");
+                    tracing::warn!(tool = custom_config.name.as_str(), error = %error, "skipping invalid custom tool configuration / 跳过无效的自定义工具配置");
                 }
             }
         }
@@ -185,7 +185,7 @@ impl ToolRegistry {
 
         tracing::info!(
             tools = ?tools.keys().collect::<Vec<_>>(),
-            "tool registry initialised"
+            "tool registry initialised / 工具注册表已初始化"
         );
 
         let definitions_cache = tools

@@ -68,7 +68,7 @@ impl Channel for CliChannel {
                         Ok(0) => break, // EOF
                         Ok(_) => {}
                         Err(e) => {
-                            eprintln!("stdin error: {e}");
+                            eprintln!("stdin error / 标准输入错误: {e}");
                             break;
                         }
                     }

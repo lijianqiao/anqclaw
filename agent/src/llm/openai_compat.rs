@@ -38,7 +38,7 @@ impl OpenAiCompatClient {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
-            .context("build reqwest client")?;
+            .context("build reqwest client / 构建 reqwest 客户端失败")?;
 
         let endpoint = build_endpoint(&config.base_url);
         let extra_headers = provider_extra_headers(&config.provider);
@@ -96,7 +96,7 @@ impl OpenAiCompatClient {
         for attempt in 0..3u32 {
             if attempt > 0 {
                 let backoff = Duration::from_millis(1000 * 2u64.pow(attempt - 1));
-                tracing::warn!(attempt, ?backoff, "retrying OpenAI-compat request");
+                tracing::warn!(attempt, ?backoff, "retrying OpenAI-compat request / 正在重试 OpenAI 兼容请求");
                 tokio::time::sleep(backoff).await;
             }
 
@@ -109,19 +109,19 @@ impl OpenAiCompatClient {
                     let oai_resp: OaiResponse = r
                         .json()
                         .await
-                        .context("deserialise OpenAI-compat response")?;
+                        .context("deserialise OpenAI-compat response / 反序列化 OpenAI 兼容响应失败")?;
                     return parse_oai_response(oai_resp);
                 }
                 Ok(r) if r.status().as_u16() == 429 || r.status().is_server_error() => {
                     let status = r.status();
                     let text = r.text().await.unwrap_or_default();
-                    tracing::warn!(%status, body = %text, "retryable error from OpenAI-compat");
+                    tracing::warn!(%status, body = %text, "retryable error from OpenAI-compat / OpenAI 兼容可重试错误");
                     last_err = Some(anyhow::anyhow!("HTTP {status}: {text}"));
                 }
                 Ok(r) => {
                     let status = r.status();
                     let text = r.text().await.unwrap_or_default();
-                    anyhow::bail!("OpenAI-compat non-retryable error HTTP {status}: {text}");
+                    anyhow::bail!("OpenAI-compat non-retryable error HTTP {status}: {text} / OpenAI 兼容不可重试错误 HTTP {status}: {text}");
                 }
                 Err(e) => {
                     last_err = Some(e.into());
@@ -130,7 +130,7 @@ impl OpenAiCompatClient {
         }
 
         Err(last_err
-            .unwrap_or_else(|| anyhow::anyhow!("OpenAI-compat request failed after retries")))
+            .unwrap_or_else(|| anyhow::anyhow!("OpenAI-compat request failed after retries / OpenAI 兼容请求在重试后仍然失败")))
     }
 
     /// Streaming version — sends SSE request, returns a channel of StreamEvents.
@@ -161,7 +161,7 @@ impl OpenAiCompatClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenAI-compat streaming error HTTP {status}: {text}");
+            anyhow::bail!("OpenAI-compat streaming error HTTP {status}: {text} / OpenAI 兼容流式错误 HTTP {status}: {text}");
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -180,7 +180,7 @@ impl OpenAiCompatClient {
                     Ok(Some(chunk)) => {
                         buffer.push_str(&String::from_utf8_lossy(&chunk));
                         if buffer.len() > MAX_BUFFER_SIZE {
-                            tracing::warn!("OpenAI SSE buffer exceeded limit, truncating");
+                            tracing::warn!("OpenAI SSE buffer exceeded limit, truncating / OpenAI SSE 缓冲区超出限制，正在截断");
                             break;
                         }
                     }
@@ -518,7 +518,7 @@ fn parse_oai_response(resp: OaiResponse) -> Result<LlmResponse> {
         .choices
         .into_iter()
         .next()
-        .context("OpenAI-compat response has no choices")?;
+        .context("OpenAI-compat response has no choices / OpenAI 兼容响应没有选项")?;
 
     let text = choice.message.content;
 

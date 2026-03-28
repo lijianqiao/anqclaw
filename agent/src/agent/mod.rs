@@ -68,7 +68,7 @@ impl AgentCore {
             .collect();
 
         if failures.is_empty() {
-            return "多轮工具执行失败，已停止自动重试。请检查日志或手动重试。".to_string();
+            return "Multiple tool rounds failed, auto-retry stopped. Check logs or retry manually. / 多轮工具执行失败，已停止自动重试。请检查日志或手动重试。".to_string();
         }
 
         let bullets = failures
@@ -79,7 +79,7 @@ impl AgentCore {
             .join("\n");
 
         format!(
-            "多轮工具执行失败，已停止自动重试。最近的失败如下：\n{}\n请根据错误信息调整网络、依赖或命令后再试。",
+            "Multiple tool rounds failed, auto-retry stopped. Recent failures: / 多轮工具执行失败，已停止自动重试。最近的失败如下：\n{}\nPlease adjust network, dependencies, or commands based on the errors and try again. / 请根据错误信息调整网络、依赖或命令后再试。",
             bullets
         )
     }
@@ -124,8 +124,8 @@ impl AgentCore {
         match self.do_handle(msg, history, None).await {
             Ok((reply, messages)) => (reply, messages),
             Err(e) => {
-                tracing::error!(error = %e, "agent handle failed");
-                let reply = OutboundMessage::error(msg, &format!("处理失败: {e}"));
+                tracing::error!(error = %e, "agent handle failed / 代理处理失败");
+                let reply = OutboundMessage::error(msg, &format!("Processing failed / 处理失败: {e}"));
                 (reply, vec![])
             }
         }
@@ -141,8 +141,8 @@ impl AgentCore {
         match self.do_handle(msg, history, Some(stream_tx)).await {
             Ok((reply, messages)) => (reply, messages),
             Err(e) => {
-                tracing::error!(error = %e, "agent streaming handle failed");
-                let reply = OutboundMessage::error(msg, &format!("处理失败: {e}"));
+                tracing::error!(error = %e, "agent streaming handle failed / 代理流式处理失败");
+                let reply = OutboundMessage::error(msg, &format!("Processing failed / 处理失败: {e}"));
                 (reply, vec![])
             }
         }
@@ -224,7 +224,7 @@ impl AgentCore {
                             trimmed = remove_count,
                             total_est = total_tokens,
                             budget = token_budget,
-                            "all history trimmed — system prompt + user message exceed token budget"
+                            "all history trimmed — system prompt + user message exceed token budget / 所有历史已裁剪 - 系统提示 + 用户消息超出令牌预算"
                         );
                     }
                 } else {
@@ -248,7 +248,7 @@ impl AgentCore {
                             trimmed = remove_count,
                             total_est = total_tokens,
                             budget = token_budget,
-                            "history trimmed to fit token budget"
+                            "history trimmed to fit token budget / 历史已裁剪以适应令牌预算"
                         );
                     }
                 }
@@ -277,7 +277,7 @@ impl AgentCore {
                     Ok(rx) => rx,
                     Err(e) => {
                         if let Some(ref fallback) = current_fallback {
-                            tracing::warn!(error = %e, "primary LLM failed, trying fallback (stream)");
+                            tracing::warn!(error = %e, "primary LLM failed, trying fallback (stream) / 主 LLM 失败，尝试备用模型（流式）");
                             fallback.chat_stream(&messages, tool_defs).await?
                         } else {
                             return Err(e);
@@ -304,7 +304,7 @@ impl AgentCore {
                     None if !partial_text.is_empty() => {
                         tracing::warn!(
                             chars = partial_text.chars().count(),
-                            "stream ended without Done event, returning partial text"
+                            "stream ended without Done event, returning partial text / 流未收到 Done 事件，返回部分文本"
                         );
                         crate::types::LlmResponse {
                             text: Some(partial_text),
@@ -312,7 +312,7 @@ impl AgentCore {
                         }
                     }
                     None => {
-                        return Err(anyhow::anyhow!("stream ended without Done event"));
+                        return Err(anyhow::anyhow!("stream ended without Done event / 流未收到 Done 事件"));
                     }
                 }
             } else {
@@ -321,7 +321,7 @@ impl AgentCore {
                     Ok(r) => r,
                     Err(e) => {
                         if let Some(ref fallback) = current_fallback {
-                            tracing::warn!(error = %e, "primary LLM failed, trying fallback");
+                            tracing::warn!(error = %e, "primary LLM failed, trying fallback / 主 LLM 失败，尝试备用模型");
                             fallback.chat(&messages, tool_defs).await?
                         } else {
                             return Err(e);
@@ -359,7 +359,7 @@ impl AgentCore {
                 tracing::info!(
                     round,
                     tools = ?response.tool_calls.iter().map(|c| &c.name).collect::<Vec<_>>(),
-                    "executing tool calls"
+                    "executing tool calls / 执行工具调用"
                 );
 
                 // Execute all tool calls concurrently (with timing)
@@ -465,7 +465,7 @@ impl AgentCore {
                         messages.push(ChatMessage::assistant(&failure_summary));
                         tracing::warn!(
                             consecutive_errors,
-                            "consecutive error protection triggered"
+                            "consecutive error protection triggered / 连续错误保护已触发"
                         );
 
                         let reply = OutboundMessage {
@@ -502,7 +502,7 @@ impl AgentCore {
                     {
                         tracing::warn!(
                             output = %result.output,
-                            "switch_model: rejected — profile name contains invalid characters"
+                            "switch_model: rejected — profile name contains invalid characters / switch_model: 已拒绝 - 配置名称包含无效字符"
                         );
                         continue;
                     }
@@ -515,14 +515,14 @@ impl AgentCore {
                                 tracing::info!(
                                     profile = profile_name,
                                     model = %current_model_name,
-                                    "switched LLM profile mid-session"
+                                    "switched LLM profile mid-session / 会话中已切换 LLM 配置"
                                 );
                             }
                             Err(e) => {
                                 tracing::warn!(
                                     error = %e,
                                     profile = profile_name,
-                                    "failed to create LLM client for profile switch"
+                                    "failed to create LLM client for profile switch / 切换配置时创建 LLM 客户端失败"
                                 );
                             }
                         }
@@ -560,14 +560,14 @@ impl AgentCore {
                 return Ok((reply, persist_messages));
             } else {
                 // Empty response — treat as error
-                let reply = OutboundMessage::error(msg, "LLM 返回了空响应");
+                let reply = OutboundMessage::error(msg, "LLM returned an empty response / LLM 返回了空响应");
                 let persist_messages = messages[persist_start..].to_vec();
                 return Ok((reply, persist_messages));
             }
         }
 
         // Exceeded max rounds
-        let error_text = format!("处理超过最大轮次限制 ({max_rounds} 轮)，已停止");
+        let error_text = format!("Exceeded max round limit ({max_rounds} rounds), stopped / 处理超过最大轮次限制 ({max_rounds} 轮)，已停止");
         messages.push(ChatMessage::assistant(&error_text));
 
         let reply = OutboundMessage::error(msg, &error_text);

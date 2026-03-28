@@ -65,7 +65,7 @@ impl Tool for ActivateSkill {
             let skill_name = args
                 .get("skill_name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("missing `skill_name` parameter"))?;
+                .ok_or_else(|| anyhow::anyhow!("missing `skill_name` parameter / 缺少 `skill_name` 参数"))?;
 
             let content = self.registry.load_content(skill_name)?;
 
@@ -90,7 +90,7 @@ impl Tool for ActivateSkill {
                 tracing::info!(
                     released = ?released,
                     active = ?active.iter().collect::<Vec<_>>(),
-                    "skills evicted to enforce max_active_skills limit"
+                    "skills evicted to enforce max_active_skills limit / 已驱逐技能以满足最大活跃技能限制"
                 );
             }
 

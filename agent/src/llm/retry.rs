@@ -45,7 +45,7 @@ impl LlmClient for RetryLlmClient {
                                 max_retries = self.max_retries,
                                 delay_ms = delay.as_millis() as u64,
                                 error = %e,
-                                "LLM call failed, retrying"
+                                "LLM call failed, retrying / LLM 调用失败，正在重试"
                             );
                             tokio::time::sleep(delay).await;
                         }
@@ -62,7 +62,8 @@ impl LlmClient for RetryLlmClient {
         &'a self,
         messages: &'a [ChatMessage],
         tools: &'a [ToolDefinition],
-    ) -> Pin<Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<StreamEvent>>> + Send + 'a>>
+    {
         // Streaming doesn't retry — the user can retry manually.
         Box::pin(async move { self.inner.chat_stream(messages, tools).await })
     }

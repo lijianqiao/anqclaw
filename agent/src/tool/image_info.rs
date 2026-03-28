@@ -3,7 +3,7 @@
 //! Pure Rust implementation, no external crate needed.
 //! Detects format via magic bytes, parses width/height from headers.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -46,7 +46,7 @@ impl ImageInfo {
         let path_str = args
             .get("path")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing `path` parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `path` parameter / 缺少 `path` 参数"))?;
 
         let include_base64 = args
             .get("include_base64")
@@ -74,7 +74,7 @@ impl ImageInfo {
         // File size check
         let metadata = tokio::fs::metadata(&path)
             .await
-            .map_err(|e| anyhow::anyhow!("stat `{}`: {e}", path.display()))?;
+            .map_err(|e| anyhow::anyhow!("stat `{}`: {e} / 获取文件信息失败", path.display()))?;
         let file_size = metadata.len();
         if file_size > MAX_IMAGE_SIZE {
             return Ok(format!(
@@ -86,7 +86,7 @@ impl ImageInfo {
 
         let bytes = tokio::fs::read(&path)
             .await
-            .map_err(|e| anyhow::anyhow!("read `{}`: {e}", path.display()))?;
+            .map_err(|e| anyhow::anyhow!("read `{}`: {e} / 读取文件失败", path.display()))?;
 
         let (format, dimensions) = parse_image_info(&bytes)?;
 
@@ -132,7 +132,7 @@ impl ImageInfo {
 /// Parse image format and dimensions from raw bytes.
 fn parse_image_info(bytes: &[u8]) -> Result<(&'static str, Option<(u32, u32)>)> {
     if bytes.len() < 4 {
-        bail!("file too small to be a valid image");
+        bail!("file too small to be a valid image / 文件太小，不是有效的图片");
     }
 
     // PNG: 8-byte signature + IHDR chunk at offset 16 (width: 4 bytes BE, height: 4 bytes BE)
@@ -183,7 +183,7 @@ fn parse_image_info(bytes: &[u8]) -> Result<(&'static str, Option<(u32, u32)>)> 
         return Ok(("BMP", dims));
     }
 
-    bail!("unrecognized image format (no matching magic bytes)");
+    bail!("unrecognized image format (no matching magic bytes) / 无法识别的图片格式（无匹配的魔术字节）");
 }
 
 /// Parse JPEG dimensions by scanning for SOF markers.

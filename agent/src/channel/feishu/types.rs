@@ -155,15 +155,22 @@ impl MsgReceivePayload {
             "image" => {
                 let v: serde_json::Value = serde_json::from_str(&lark_msg.content)
                     .map_err(|e| format!("image content parse failed: {e}"))?;
-                let key = v.get("image_key").and_then(|k| k.as_str())
+                let key = v
+                    .get("image_key")
+                    .and_then(|k| k.as_str())
                     .ok_or("image content missing image_key")?
                     .to_string();
-                MessageContent::Image { key, image_data: None }
+                MessageContent::Image {
+                    key,
+                    image_data: None,
+                }
             }
             "file" => {
                 let v: serde_json::Value = serde_json::from_str(&lark_msg.content)
                     .map_err(|e| format!("file content parse failed: {e}"))?;
-                let key = v.get("file_key").and_then(|k| k.as_str())
+                let key = v
+                    .get("file_key")
+                    .and_then(|k| k.as_str())
                     .ok_or("file content missing file_key")?
                     .to_string();
                 let name = v
@@ -171,7 +178,11 @@ impl MsgReceivePayload {
                     .and_then(|n| n.as_str())
                     .unwrap_or("unknown")
                     .to_string();
-                MessageContent::File { key, name, file_bytes: None }
+                MessageContent::File {
+                    key,
+                    name,
+                    file_bytes: None,
+                }
             }
             "post" => {
                 // Rich text (post) — extract plain text from structured content.
@@ -275,22 +286,19 @@ fn extract_post_text(v: &serde_json::Value) -> String {
     // Locate the content array — try two structures:
     // 1. Top-level "content" (flat / no locale wrapper)
     // 2. Under a locale key like "zh_cn"
-    let content = v
-        .get("content")
-        .and_then(|c| c.as_array())
-        .or_else(|| {
-            let locales = ["zh_cn", "en_us", "ja_jp", "zh_hk", "zh_tw"];
-            locales
-                .iter()
-                .find_map(|locale| v.get(locale))
-                .or_else(|| {
-                    // Fall back to first object value that has "content"
-                    v.as_object()
-                        .and_then(|obj| obj.values().find(|val| val.get("content").is_some()))
-                })
-                .and_then(|post| post.get("content"))
-                .and_then(|c| c.as_array())
-        });
+    let content = v.get("content").and_then(|c| c.as_array()).or_else(|| {
+        let locales = ["zh_cn", "en_us", "ja_jp", "zh_hk", "zh_tw"];
+        locales
+            .iter()
+            .find_map(|locale| v.get(locale))
+            .or_else(|| {
+                // Fall back to first object value that has "content"
+                v.as_object()
+                    .and_then(|obj| obj.values().find(|val| val.get("content").is_some()))
+            })
+            .and_then(|post| post.get("content"))
+            .and_then(|c| c.as_array())
+    });
 
     let Some(content) = content else {
         return String::new();
@@ -318,10 +326,7 @@ fn extract_post_text(v: &serde_json::Value) -> String {
                     }
                 }
                 "code_block" => {
-                    let lang = elem
-                        .get("language")
-                        .and_then(|l| l.as_str())
-                        .unwrap_or("");
+                    let lang = elem.get("language").and_then(|l| l.as_str()).unwrap_or("");
                     // Map Feishu's "PLAIN_TEXT" to empty, keep real languages
                     let lang_tag = if lang.is_empty() || lang.eq_ignore_ascii_case("PLAIN_TEXT") {
                         ""
@@ -488,7 +493,10 @@ mod tests {
             ]]
         });
         let text = extract_post_text(&v);
-        assert!(text.contains("请阅读以下代码："), "should contain text element");
+        assert!(
+            text.contains("请阅读以下代码："),
+            "should contain text element"
+        );
         assert!(text.contains("```Python"), "should contain language tag");
         assert!(text.contains("def foo():\n    pass"), "should contain code");
         assert!(text.contains("```"), "should close code block");
@@ -555,7 +563,11 @@ mod tests {
             },
         };
         let result = payload.into_inbound();
-        assert!(result.is_ok(), "should not drop the message: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "should not drop the message: {:?}",
+            result.err()
+        );
         let msg = result.unwrap();
         match &msg.content {
             MessageContent::Text(t) => {

@@ -1,1 +1,11 @@
 /target
+data/
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+*.log
+task_plan.md
+findings.md
+progress.md
