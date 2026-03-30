@@ -16,7 +16,7 @@ use crate::audit::AuditLogger;
 use crate::config::AppConfig;
 use crate::llm::{LlmClient, create_llm_client};
 use crate::memory::MemoryStore;
-use crate::skill::SkillRegistry;
+use crate::skill::{SkillMeta, SkillRegistry};
 use crate::token;
 use crate::tool::ToolRegistry;
 use crate::types::{ChatMessage, InboundMessage, OutboundMessage, StreamEvent};
@@ -40,6 +40,65 @@ pub struct AgentCore {
 }
 
 impl AgentCore {
+    fn auto_activate_skills(
+        &self,
+        user_text: &str,
+        history: &[ChatMessage],
+    ) -> Vec<(String, String)> {
+        let Some(registry) = self.skill_registry.as_ref() else {
+            return Vec::new();
+        };
+
+        let max_active = self.config.skills.max_active_skills as usize;
+        if max_active == 0 {
+            return Vec::new();
+        }
+
+        let mut context_parts = vec![user_text.to_ascii_lowercase()];
+        context_parts.extend(
+            history
+                .iter()
+                .rev()
+                .filter(|message| message.role != crate::types::Role::System)
+                .take(8)
+                .map(|message| message.content.to_ascii_lowercase()),
+        );
+        let context = context_parts.join("\n");
+
+        registry
+            .list()
+            .into_iter()
+            .filter(|skill| Self::skill_matches_context(skill, &context))
+            .take(max_active)
+            .filter_map(|skill| match registry.load_content(&skill.name) {
+                Ok(content) => Some((skill.name, content)),
+                Err(error) => {
+                    tracing::warn!(
+                        skill = %skill.name,
+                        error = %error,
+                        "failed to auto-activate skill / 自动激活技能失败"
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn skill_matches_context(skill: &SkillMeta, context: &str) -> bool {
+        let skill_name = skill.name.trim().to_ascii_lowercase();
+        if !skill_name.is_empty() && context.contains(&skill_name) {
+            return true;
+        }
+
+        skill
+            .trigger
+            .split([',', '，', '、', ';', '；', '\n'])
+            .map(str::trim)
+            .filter(|term| !term.is_empty())
+            .map(str::to_ascii_lowercase)
+            .any(|term| context.contains(&term))
+    }
+
     fn summarize_tool_failures(results: &[crate::types::ToolResult], max_items: usize) -> String {
         let failures: Vec<String> = results
             .iter()
@@ -167,6 +226,7 @@ impl AgentCore {
 
         // 2. Search relevant memories
         let user_text = msg.content.to_text();
+        let activated_skills = self.auto_activate_skills(&user_text, history);
         let memories = self
             .memory
             .search_memory(&user_text, self.config.memory.search_limit as usize)
@@ -183,6 +243,20 @@ impl AgentCore {
         let mem_text = format_memories(&memories);
         if !mem_text.is_empty() {
             messages.push(ChatMessage::system(&mem_text));
+        }
+
+        if !activated_skills.is_empty() {
+            tracing::info!(
+                skills = ?activated_skills
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+                "auto-activated skills from request/history / 已根据请求和历史自动激活技能"
+            );
+            for (skill_name, content) in &activated_skills {
+                let injected = format!("# Activated Skill: {skill_name}\n\n{content}");
+                messages.push(ChatMessage::system(&injected));
+            }
         }
 
         // History (from SQLite)
@@ -603,6 +677,7 @@ mod tests {
         responses: Vec<LlmResponse>,
         stream_events: Option<Vec<StreamEvent>>,
         call_count: AtomicU32,
+        last_messages: std::sync::Mutex<Vec<ChatMessage>>,
     }
 
     impl MockLlm {
@@ -611,6 +686,7 @@ mod tests {
                 responses,
                 stream_events: None,
                 call_count: AtomicU32::new(0),
+                last_messages: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -619,17 +695,26 @@ mod tests {
                 responses: vec![],
                 stream_events: Some(events),
                 call_count: AtomicU32::new(0),
+                last_messages: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn last_messages(&self) -> Vec<ChatMessage> {
+            self.last_messages
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
         }
     }
 
     impl LlmClient for MockLlm {
         fn chat<'a>(
             &'a self,
-            _messages: &'a [ChatMessage],
+            messages: &'a [ChatMessage],
             _tools: &'a [ToolDefinition],
         ) -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + 'a>> {
             Box::pin(async {
+                *self.last_messages.lock().unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
                 let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
                 if idx < self.responses.len() {
                     Ok(self.responses[idx].clone())
@@ -981,5 +1066,71 @@ max_tool_rounds = 10
             !has_stop_hint,
             "stop hint should NOT appear when success resets counter"
         );
+    }
+
+    #[tokio::test]
+    async fn test_auto_activates_skill_from_recent_history() {
+        let memory = test_memory().await;
+        let config = test_config();
+
+        let skill_dir = std::env::temp_dir().join("anqclaw_test_auto_activate_xlsx_skill");
+        let _ = std::fs::remove_dir_all(&skill_dir);
+        std::fs::create_dir_all(skill_dir.join("xlsx")).unwrap();
+        std::fs::write(
+            skill_dir.join("xlsx").join("SKILL.md"),
+            "---\nname: xlsx\ndescription: Spreadsheet skill\n---\nUse pandas for spreadsheet inspection.",
+        )
+        .unwrap();
+        let skill_registry = Arc::new(SkillRegistry::scan(&skill_dir));
+
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("已分析。".into()),
+            tool_calls: vec![],
+        }]));
+
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            Some(skill_registry.clone()),
+            vec![],
+            Some(&config.skills),
+        ));
+        let agent = AgentCore::new(
+            mock_llm.clone(),
+            None,
+            tools,
+            memory,
+            config,
+            None,
+            Some(skill_registry),
+        )
+        .await;
+
+        let msg = InboundMessage {
+            content: MessageContent::Text(
+                "现在我放进去了。你看下有多少设备，并且对应的基础信息是什么。".into(),
+            ),
+            ..test_inbound()
+        };
+        let history = vec![
+            ChatMessage::user("给我看下工作区中的 设备数据导出.xlsx 表有多少设备"),
+            ChatMessage::assistant("文件 设备数据导出.xlsx 在当前工作区未找到。"),
+        ];
+
+        let (reply, _persist) = agent.handle(&msg, &history).await;
+
+        assert_eq!(reply.content, "已分析。");
+        let llm_messages = mock_llm.last_messages();
+        assert!(llm_messages.iter().any(|message| {
+            message.role == crate::types::Role::System
+                && message.content.contains("# Activated Skill: xlsx")
+                && message
+                    .content
+                    .contains("Use pandas for spreadsheet inspection.")
+        }));
+
+        let _ = std::fs::remove_dir_all(&skill_dir);
     }
 }

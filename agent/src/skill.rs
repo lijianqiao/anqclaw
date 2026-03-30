@@ -1,20 +1,35 @@
-//! Skill registry — scans `.md` files with YAML frontmatter from the skills directory.
+//! Skill registry — scans directory-based skill packages from the skills directory.
 //!
-//! Each skill file has the format:
+//! Each skill package has the format:
 //! ```markdown
-//! ---
-//! name: code-review
-//! description: Professional code review expert
-//! trigger: When the user mentions code review, CR, review
-//! ---
-//!
-//! Full skill prompt content here...
+//! skills/<skill-name>/SKILL.md
 //! ```
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
+
+const SKILL_FILE_NAME: &str = "SKILL.md";
+
+fn is_legacy_skill_file(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name != SKILL_FILE_NAME)
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+}
+
+fn is_relevant_skill_event_path(skills_dir: &Path, path: &Path) -> bool {
+    if path.file_name().is_some_and(|name| name == SKILL_FILE_NAME) {
+        return path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .is_some_and(|grandparent| grandparent == skills_dir);
+    }
+
+    path.parent().is_some_and(|parent| parent == skills_dir)
+}
 
 // ─── SkillMeta ──────────────────────────────────────────────────────────────
 
@@ -38,7 +53,7 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
-    /// Scan a directory for `.md` files with YAML frontmatter.
+    /// Scan a directory for skill packages containing `SKILL.md`.
     /// Returns a registry with all valid skills found.
     pub fn scan(skills_dir: &Path) -> Self {
         let skills = scan_skills(skills_dir);
@@ -91,7 +106,10 @@ impl SkillRegistry {
             .ok_or_else(|| anyhow::anyhow!("skill `{name}` not found / 技能 `{name}` 未找到"))?;
 
         let raw = std::fs::read_to_string(&meta.path).map_err(|e| {
-            anyhow::anyhow!("failed to read skill file `{}`: {e} / 读取技能文件失败", meta.path.display())
+            anyhow::anyhow!(
+                "failed to read skill file `{}`: {e} / 读取技能文件失败",
+                meta.path.display()
+            )
         })?;
 
         Ok(strip_frontmatter(&raw))
@@ -110,10 +128,10 @@ impl SkillRegistry {
         out.push_str("When a user's request matches a skill's trigger, call `activate_skill` with the skill name to load it BEFORE responding.\n\n");
 
         for skill in skills.iter() {
-            out.push_str(&format!(
-                "- **{}**: {}\n  Trigger: {}\n",
-                skill.name, skill.description, skill.trigger
-            ));
+            out.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
+            if !skill.trigger.trim().is_empty() {
+                out.push_str(&format!("  Trigger: {}\n", skill.trigger));
+            }
         }
 
         out.push_str(
@@ -131,6 +149,7 @@ pub fn spawn_skill_watcher(registry: Arc<SkillRegistry>) -> Result<notify::Recom
     use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
 
     let dir = registry.dir().to_path_buf();
+    let event_dir = dir.clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
 
     let mut watcher = recommended_watcher(
@@ -140,20 +159,19 @@ pub fn spawn_skill_watcher(registry: Arc<SkillRegistry>) -> Result<notify::Recom
                     event.kind,
                     EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
                 );
-                if dominated {
-                    let is_md = event
+                if dominated
+                    && event
                         .paths
                         .iter()
-                        .any(|p| p.extension().is_some_and(|e| e == "md"));
-                    if is_md {
-                        let _ = tx.try_send(());
-                    }
+                        .any(|path| is_relevant_skill_event_path(&event_dir, path))
+                {
+                    let _ = tx.try_send(());
                 }
             }
         },
     )?;
 
-    watcher.watch(&dir, RecursiveMode::NonRecursive)?;
+    watcher.watch(&dir, RecursiveMode::Recursive)?;
 
     tokio::spawn(async move {
         let debounce = tokio::time::Duration::from_secs(1);
@@ -170,7 +188,7 @@ pub fn spawn_skill_watcher(registry: Arc<SkillRegistry>) -> Result<notify::Recom
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
 
-/// Scan a directory for `.md` files with valid YAML frontmatter, returning skill metadata.
+/// Scan a directory for skill packages containing `SKILL.md`, returning skill metadata.
 fn scan_skills(skills_dir: &Path) -> Vec<SkillMeta> {
     let mut skills = Vec::new();
 
@@ -189,18 +207,34 @@ fn scan_skills(skills_dir: &Path) -> Vec<SkillMeta> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "md") {
-            match parse_frontmatter(&path) {
-                Ok(Some(meta)) => {
-                    tracing::debug!(name = %meta.name, "loaded skill / 已加载技能");
-                    skills.push(meta);
-                }
-                Ok(None) => {
-                    tracing::debug!(path = %path.display(), "skipping .md file without valid frontmatter / 跳过无有效前置元数据的 .md 文件");
-                }
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "failed to parse skill file / 解析技能文件失败");
-                }
+        if !path.is_dir() {
+            if is_legacy_skill_file(&path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    "legacy flat skill file ignored; expected skills/<name>/SKILL.md / 已忽略遗留平铺技能文件；当前仅支持 skills/<name>/SKILL.md"
+                );
+            } else {
+                tracing::debug!(path = %path.display(), "skipping non-directory skill entry / 跳过非目录技能项");
+            }
+            continue;
+        }
+
+        let skill_path = path.join(SKILL_FILE_NAME);
+        if !skill_path.is_file() {
+            tracing::debug!(path = %path.display(), "skipping skill directory without SKILL.md / 跳过缺少 SKILL.md 的技能目录");
+            continue;
+        }
+
+        match parse_frontmatter(&skill_path) {
+            Ok(Some(meta)) => {
+                tracing::debug!(name = %meta.name, "loaded skill / 已加载技能");
+                skills.push(meta);
+            }
+            Ok(None) => {
+                tracing::debug!(path = %skill_path.display(), "skipping SKILL.md without valid frontmatter / 跳过无有效前置元数据的 SKILL.md");
+            }
+            Err(e) => {
+                tracing::warn!(path = %skill_path.display(), error = %e, "failed to parse skill file / 解析技能文件失败");
             }
         }
     }
@@ -249,11 +283,16 @@ fn parse_frontmatter(path: &Path) -> Result<Option<SkillMeta>> {
     }
 
     if name.is_empty() {
-        // Use filename as fallback name
-        name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
+        name = if path.file_name().is_some_and(|file| file == SKILL_FILE_NAME) {
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        } else {
+            path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
     }
 
     if name.is_empty() {
@@ -300,13 +339,19 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn create_skill_package(root: &Path, name: &str, body: &str) -> PathBuf {
+        let skill_dir = root.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_path = skill_dir.join(SKILL_FILE_NAME);
+        std::fs::write(&skill_path, body).unwrap();
+        skill_path
+    }
+
     #[test]
     fn test_parse_frontmatter_valid() {
         let dir = std::env::temp_dir().join("anqclaw_test_skills_parse");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let skill_path = dir.join("test-skill.md");
+        let skill_path = create_skill_package(&dir, "code-review", "");
         let mut f = std::fs::File::create(&skill_path).unwrap();
         writeln!(f, "---").unwrap();
         writeln!(f, "name: code-review").unwrap();
@@ -330,7 +375,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let skill_path = dir.join("plain.md");
+        let skill_path = dir.join(SKILL_FILE_NAME);
         std::fs::write(&skill_path, "Just a plain markdown file.").unwrap();
 
         let result = parse_frontmatter(&skill_path).unwrap();
@@ -359,24 +404,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Create two skill files
-        std::fs::write(
-            dir.join("skill-a.md"),
+        create_skill_package(
+            &dir,
+            "skill-a",
             "---\nname: skill-a\ndescription: Skill A\ntrigger: when A\n---\nContent A",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("skill-b.md"),
+        );
+        create_skill_package(
+            &dir,
+            "skill-b",
             "---\nname: skill-b\ndescription: Skill B\ntrigger: when B\n---\nContent B",
+        );
+        std::fs::write(
+            dir.join("legacy.md"),
+            "---\nname: legacy\ndescription: Legacy Skill\ntrigger: legacy\n---\nLegacy",
         )
         .unwrap();
-        // Create a non-skill file
-        std::fs::write(dir.join("readme.txt"), "not a skill").unwrap();
 
         let registry = SkillRegistry::scan(&dir);
         assert_eq!(registry.list().len(), 2);
         assert!(registry.find("skill-a").is_some());
         assert!(registry.find("skill-b").is_some());
+        assert!(registry.find("legacy").is_none());
         assert!(registry.find("nonexistent").is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -388,10 +436,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        std::fs::write(
-            dir.join("my-skill.md"),
+        create_skill_package(
+            &dir,
+            "my-skill",
             "---\nname: my-skill\ndescription: My Skill\ntrigger: test\n---\n\nFull prompt body here.\nWith multiple lines.",
-        ).unwrap();
+        );
 
         let registry = SkillRegistry::scan(&dir);
         let content = registry.load_content("my-skill").unwrap();
@@ -407,11 +456,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        std::fs::write(
-            dir.join("review.md"),
+        create_skill_package(
+            &dir,
+            "code-review",
             "---\nname: code-review\ndescription: Code reviewer\ntrigger: review, CR\n---\nBody",
-        )
-        .unwrap();
+        );
 
         let registry = SkillRegistry::scan(&dir);
         let summary = registry.build_summary();
@@ -443,5 +492,48 @@ mod tests {
 
         let registry = SkillRegistry::scan(&dir);
         assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn test_parse_frontmatter_uses_directory_name_for_skill_md_fallback() {
+        let dir = std::env::temp_dir().join("anqclaw_test_skills_fallback_name");
+        let _ = std::fs::remove_dir_all(&dir);
+        let skill_path = create_skill_package(
+            &dir,
+            "xlsx",
+            "---\ndescription: Spreadsheet helper\ntrigger: xlsx, csv\n---\nBody",
+        );
+
+        let meta = parse_frontmatter(&skill_path).unwrap().unwrap();
+        assert_eq!(meta.name, "xlsx");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_relevant_skill_event_path_filters_nested_noise() {
+        let root = PathBuf::from("C:/skills");
+
+        assert!(is_relevant_skill_event_path(
+            &root,
+            &root.join("xlsx").join(SKILL_FILE_NAME)
+        ));
+        assert!(is_relevant_skill_event_path(&root, &root.join("xlsx")));
+        assert!(!is_relevant_skill_event_path(
+            &root,
+            &root.join("xlsx").join("scripts").join("analyze.py")
+        ));
+        assert!(!is_relevant_skill_event_path(
+            &root,
+            &root.join("xlsx").join("README.md")
+        ));
+    }
+
+    #[test]
+    fn test_detects_legacy_flat_skill_file() {
+        assert!(is_legacy_skill_file(Path::new("legacy.md")));
+        assert!(is_legacy_skill_file(Path::new("LEGACY.MD")));
+        assert!(!is_legacy_skill_file(Path::new(SKILL_FILE_NAME)));
+        assert!(!is_legacy_skill_file(Path::new("legacy.txt")));
     }
 }

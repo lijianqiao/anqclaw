@@ -16,6 +16,7 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are anqclaw, a helpful personal a
 - If a tool call fails, analyze the error and try an alternative approach.
 - Save important information to memory for future reference.
 - Respect file access boundaries — only operate within the workspace directory.
+- When a task references local input files, verify the files exist before running scripts or preparing runtimes.
 - For shell commands, only use allowed commands.
 
 ## Language

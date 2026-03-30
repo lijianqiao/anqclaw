@@ -122,6 +122,8 @@ impl EnvironmentProbe {
 
         // Environment guidelines
         s += "\n### Environment Guidelines\n\n";
+        s += "- If the user mentions a local input file, FIRST verify that the file exists within the workspace or trusted directories before writing scripts, bootstrapping Python, or installing packages.\n";
+        s += "- Prefer checking existence with `file_read` or a safe `shell_exec` listing command. If the file is missing, stop and report that immediately instead of preparing an environment.\n";
 
         let has_python = self.has("python3") || self.has("python");
         let has_pip = self.has("pip3") || self.has("pip");
@@ -133,12 +135,14 @@ impl EnvironmentProbe {
             s += "- Python is available with pip. You can install packages and run scripts.\n";
             s += "- For data processing (xlsx, csv, docx), write Python scripts and execute via shell_exec.\n";
             s += "- Store generated scripts under `script/` in the workspace root, not under `workspace/`.\n";
+            s += "- Only install packages after the required input files have been confirmed to exist.\n";
             s +=
                 "- If a package is missing, install it first (prefer uv if available, else pip).\n";
         } else if managed_bootstrap {
             s += "- A managed Python runtime can be bootstrapped automatically for shell_exec tasks.\n";
             s += "- For data processing (xlsx, csv, docx), write Python scripts and execute via shell_exec.\n";
             s += "- Store generated scripts under `script/` in the workspace root, not under `workspace/`.\n";
+            s += "- Do NOT trigger managed runtime bootstrap until the required input files have been confirmed to exist.\n";
             s += "- If Python, pip, or uv is missing, shell_exec may prepare the isolated runtime automatically.\n";
         } else if has_python && !has_pip {
             s += "- Python is available but pip is NOT. You can run scripts with stdlib only.\n";
@@ -303,6 +307,10 @@ mod tests {
         assert!(section.contains("node: NOT available"));
         assert!(section.contains("Python is available with pip"));
         assert!(section.contains("write Python scripts"));
+        assert!(section.contains("FIRST verify that the file exists"));
+        assert!(section.contains(
+            "Only install packages after the required input files have been confirmed to exist"
+        ));
     }
 
     #[test]
@@ -389,6 +397,7 @@ mod tests {
         let section = probe.to_prompt_section(&config);
         assert!(section.contains("bootstrapped automatically"));
         assert!(section.contains("shell_exec may prepare the isolated runtime automatically"));
+        assert!(section.contains("Do NOT trigger managed runtime bootstrap until the required input files have been confirmed to exist"));
     }
 
     #[test]
