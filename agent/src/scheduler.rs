@@ -11,15 +11,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use cron::Schedule;
 
 use crate::agent::AgentCore;
 use crate::channel::Channel;
 use crate::config::SchedulerTaskConfig;
+use crate::heartbeat::{HEARTBEAT_TASK_NAME, HeartbeatTask};
 use crate::memory::MemoryStore;
 use crate::paths::resolve_path;
 use crate::types::InboundMessage;
+
+const SCHEDULER_HISTORY_LIMIT: usize = 5;
+const SCHEDULER_POLL_INTERVAL_SECS: u64 = 30;
 
 // ─── Scheduler ──────────────────────────────────────────────────────────────
 
@@ -32,7 +36,12 @@ pub struct Scheduler {
 
 struct ScheduledTask {
     config: SchedulerTaskConfig,
-    schedule: Schedule,
+    schedule: TaskSchedule,
+}
+
+enum TaskSchedule {
+    Cron(Box<Schedule>),
+    FixedInterval(Duration),
 }
 
 impl Scheduler {
@@ -40,6 +49,7 @@ impl Scheduler {
     /// logged and skipped (the task is not registered).
     pub fn new(
         tasks: &[SchedulerTaskConfig],
+        heartbeat_task: Option<HeartbeatTask>,
         agent: Arc<AgentCore>,
         memory: Arc<MemoryStore>,
         channels: Vec<Arc<dyn Channel>>,
@@ -70,7 +80,7 @@ impl Scheduler {
                     );
                     scheduled.push(ScheduledTask {
                         config: resolved_cfg,
-                        schedule,
+                        schedule: TaskSchedule::Cron(Box::new(schedule)),
                     });
                 }
                 Err(e) => {
@@ -82,6 +92,18 @@ impl Scheduler {
                     );
                 }
             }
+        }
+
+        if let Some(heartbeat_task) = heartbeat_task {
+            tracing::info!(
+                interval_secs = heartbeat_task.interval.as_secs(),
+                path = heartbeat_task.config.prompt_file.as_str(),
+                "scheduler: heartbeat task registered / 调度器: 心跳任务已注册"
+            );
+            scheduled.push(ScheduledTask {
+                config: heartbeat_task.config,
+                schedule: TaskSchedule::FixedInterval(heartbeat_task.interval),
+            });
         }
 
         Self {
@@ -104,12 +126,19 @@ impl Scheduler {
             return Ok(());
         }
 
-        tracing::info!(count = self.tasks.len(), "scheduler: started / 调度器: 已启动");
+        tracing::info!(
+            count = self.tasks.len(),
+            "scheduler: started / 调度器: 已启动"
+        );
 
-        // Track last-fired time for each task to prevent double-firing
-        let mut last_fired: Vec<chrono::DateTime<Utc>> = vec![Utc::now(); self.tasks.len()];
+        let now = Utc::now();
+        let mut next_runs: Vec<chrono::DateTime<Utc>> = self
+            .tasks
+            .iter()
+            .map(|task| task.next_run_after(now))
+            .collect();
 
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut interval = tokio::time::interval(Duration::from_secs(SCHEDULER_POLL_INTERVAL_SECS));
         // Consume the immediate first tick
         interval.tick().await;
 
@@ -118,11 +147,8 @@ impl Scheduler {
             let now = Utc::now();
 
             for (i, task) in self.tasks.iter().enumerate() {
-                // Find the next fire time after the last fired time
-                if let Some(next) = task.schedule.after(&last_fired[i]).next()
-                    && next <= now
-                {
-                    last_fired[i] = now;
+                if next_runs[i] <= now {
+                    next_runs[i] = task.next_run_after(now);
                     self.run_task(task).await;
                 }
             }
@@ -143,22 +169,28 @@ impl Scheduler {
 
         tracing::info!(name = %task.config.name, "scheduler: running task / 调度器: 正在执行任务");
 
-        let chat_id = format!("__scheduler__{}", task.config.name);
-        let msg = InboundMessage {
-            channel: "__scheduler__".into(),
-            chat_id: chat_id.clone(),
-            sender_id: "__system__".into(),
-            message_id: String::new(),
-            content: crate::types::MessageContent::Text(prompt),
-            timestamp: Utc::now().timestamp(),
-            trace_id: String::new(),
-            images: vec![],
+        let (chat_id, msg) = if task.is_heartbeat_task() {
+            let msg = InboundMessage::heartbeat(&prompt);
+            (msg.chat_id.clone(), msg)
+        } else {
+            let chat_id = format!("__scheduler__{}", task.config.name);
+            let msg = InboundMessage {
+                channel: "__scheduler__".into(),
+                chat_id: chat_id.clone(),
+                sender_id: "__system__".into(),
+                message_id: String::new(),
+                content: crate::types::MessageContent::Text(prompt),
+                timestamp: Utc::now().timestamp(),
+                trace_id: String::new(),
+                images: vec![],
+            };
+            (chat_id, msg)
         };
 
         // Load task-specific history
         let history = self
             .memory
-            .get_history(&chat_id, 5)
+            .get_history(&chat_id, SCHEDULER_HISTORY_LIMIT)
             .await
             .unwrap_or_default();
 
@@ -242,4 +274,21 @@ impl Scheduler {
 
         None
     }
+}
+
+impl ScheduledTask {
+    fn is_heartbeat_task(&self) -> bool {
+        self.config.name == HEARTBEAT_TASK_NAME
+    }
+
+    fn next_run_after(&self, after: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+        match &self.schedule {
+            TaskSchedule::Cron(schedule) => schedule.after(&after).next().unwrap_or(after),
+            TaskSchedule::FixedInterval(interval) => after + duration_to_chrono(*interval),
+        }
+    }
+}
+
+fn duration_to_chrono(duration: Duration) -> ChronoDuration {
+    ChronoDuration::from_std(duration).unwrap_or_else(|_| ChronoDuration::seconds(i64::MAX))
 }

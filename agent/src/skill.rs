@@ -85,48 +85,88 @@ pub struct SkillMeta {
     pub disable_model_invocation: bool,
     pub source: String,
     pub path: PathBuf,
+    normalized_name: String,
+    normalized_description: String,
+    normalized_triggers: Vec<String>,
+    normalized_keywords: Vec<String>,
+    normalized_extensions: Vec<String>,
 }
 
 impl SkillMeta {
+    fn with_normalized_terms(mut self) -> Self {
+        self.normalized_name = self.name.trim().to_lowercase();
+        self.normalized_description = self.description.trim().to_lowercase();
+        self.normalized_triggers = split_terms(&self.trigger);
+        self.normalized_keywords = normalize_keywords(&self.keywords);
+        self.normalized_extensions = normalize_extensions(&self.extensions);
+        self
+    }
+
+    /// Return the normalized skill name for matching.
+    pub fn normalized_name(&self) -> &str {
+        &self.normalized_name
+    }
+
+    /// Return the normalized description for matching.
+    pub fn normalized_description(&self) -> &str {
+        &self.normalized_description
+    }
+
     /// Return normalized trigger terms for matching.
-    pub fn trigger_terms(&self) -> Vec<String> {
-        self.trigger
-            .split([',', '，', '、', ';', '；', '\n'])
-            .map(str::trim)
-            .filter(|term| !term.is_empty())
-            .map(|term| term.to_lowercase())
-            .collect()
+    pub fn trigger_terms(&self) -> &[String] {
+        &self.normalized_triggers
     }
 
     /// Return normalized keyword terms for matching.
-    pub fn keyword_terms(&self) -> Vec<String> {
-        self.keywords
-            .iter()
-            .map(|keyword| keyword.trim().to_lowercase())
-            .filter(|keyword| !keyword.is_empty())
-            .collect()
+    pub fn keyword_terms(&self) -> &[String] {
+        &self.normalized_keywords
     }
 
     /// Return normalized extensions with a leading dot.
-    pub fn extension_terms(&self) -> Vec<String> {
-        self.extensions
-            .iter()
-            .map(|extension| extension.trim().to_lowercase())
-            .filter(|extension| !extension.is_empty())
-            .map(|extension| {
-                if extension.starts_with('.') {
-                    extension
-                } else {
-                    format!(".{extension}")
-                }
-            })
-            .collect()
+    pub fn extension_terms(&self) -> &[String] {
+        &self.normalized_extensions
     }
 
     /// Return the normalized file location used in prompt summaries.
     pub fn prompt_location(&self) -> String {
         self.path.to_string_lossy().replace('\\', "/")
     }
+}
+
+fn split_terms(value: &str) -> Vec<String> {
+    value
+        .split([',', '，', '、', ';', '；', '\n'])
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(|term| term.to_lowercase())
+        .collect()
+}
+
+fn normalize_keywords(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|keyword| keyword.trim().to_lowercase())
+        .filter(|keyword| !keyword.is_empty())
+        .collect()
+}
+
+fn normalize_extensions(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(|value| normalize_extension(value))
+        .collect()
+}
+
+fn normalize_extension(value: &str) -> Option<String> {
+    let normalized = value.trim().to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(if normalized.starts_with('.') {
+        normalized
+    } else {
+        format!(".{normalized}")
+    })
 }
 
 // ─── SkillRegistry ──────────────────────────────────────────────────────────
@@ -573,7 +613,13 @@ fn parse_frontmatter(
         disable_model_invocation: frontmatter.disable_model_invocation,
         source: source.name.clone(),
         path: path.to_path_buf(),
-    }))
+        normalized_name: String::new(),
+        normalized_description: String::new(),
+        normalized_triggers: vec![],
+        normalized_keywords: vec![],
+        normalized_extensions: vec![],
+    }
+    .with_normalized_terms()))
 }
 
 fn extract_frontmatter(content: &str) -> Option<&str> {
@@ -684,6 +730,11 @@ mod tests {
         assert_eq!(meta.trigger, "code review, CR, review");
         assert_eq!(meta.keywords, vec!["reviewer", "static-analysis"]);
         assert_eq!(meta.extensions, vec![".rs", ".py"]);
+        assert_eq!(meta.normalized_name(), "code-review");
+        assert_eq!(meta.normalized_description(), "expert code reviewer");
+        assert_eq!(meta.trigger_terms(), &["code review", "cr", "review"]);
+        assert_eq!(meta.keyword_terms(), &["reviewer", "static-analysis"]);
+        assert_eq!(meta.extension_terms(), &[".rs", ".py"]);
         assert_eq!(meta.priority, 80);
         assert!(meta.disable_model_invocation);
 

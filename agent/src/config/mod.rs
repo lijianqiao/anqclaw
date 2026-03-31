@@ -4,6 +4,7 @@ mod sections;
 pub use sections::*;
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
@@ -321,5 +322,31 @@ impl AppConfig {
             skills: raw.skills,
             scheduler: raw.scheduler,
         })
+    }
+
+    /// Resolve all user-facing path fields against the anqclaw home directory.
+    pub fn resolve_paths_against(&mut self, home: &Path) {
+        self.app.workspace = crate::paths::resolve_path(home, &self.app.workspace)
+            .to_string_lossy()
+            .into_owned();
+        self.memory.db_path = crate::paths::resolve_path(home, &self.memory.db_path)
+            .to_string_lossy()
+            .into_owned();
+        self.tools.file_access_dir = crate::paths::resolve_path(home, &self.tools.file_access_dir)
+            .to_string_lossy()
+            .into_owned();
+        self.agent.venv_path = crate::paths::resolve_path(home, &self.agent.venv_path)
+            .to_string_lossy()
+            .into_owned();
+        if !self.app.log_file.is_empty() {
+            self.app.log_file = crate::paths::resolve_path(home, &self.app.log_file)
+                .to_string_lossy()
+                .into_owned();
+        }
+        if !self.audit.log_file.is_empty() {
+            self.audit.log_file = crate::paths::resolve_path(home, &self.audit.log_file)
+                .to_string_lossy()
+                .into_owned();
+        }
     }
 }

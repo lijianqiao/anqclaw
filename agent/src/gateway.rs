@@ -19,7 +19,15 @@ use crate::channel::Channel;
 use crate::config::AppConfig;
 use crate::memory::MemoryStore;
 use crate::metrics::Metrics;
+use crate::session::build_session_key;
 use crate::types::{InboundMessage, OutboundMessage};
+
+const RECENT_MESSAGE_CACHE_CAPACITY: usize = 1000;
+const GATEWAY_MESSAGE_QUEUE_CAPACITY: usize = 256;
+const GATEWAY_QUEUE_MONITOR_INTERVAL_SECS: u64 = 10;
+const GATEWAY_QUEUE_PRESSURE_MIN_REMAINING_CAPACITY: usize = 64;
+const GATEWAY_GC_INTERVAL_SECS: u64 = 60;
+const GATEWAY_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
 // ─── Gateway ─────────────────────────────────────────────────────────────────
 
@@ -32,7 +40,7 @@ pub struct Gateway {
     metrics: Arc<Metrics>,
     /// Per-chat mutex to serialise processing within the same conversation.
     chat_locks: DashMap<String, Arc<Mutex<()>>>,
-    /// Recent message IDs for dedup (LRU, capacity 1000).
+    /// Recent message IDs for dedup.
     recent_ids: Mutex<LruCache<String, ()>>,
     /// Per-chat sliding-window rate limiter: chat_id → list of request timestamps.
     rate_limiter: DashMap<String, Vec<Instant>>,
@@ -57,7 +65,10 @@ impl Gateway {
             config,
             metrics,
             chat_locks: DashMap::new(),
-            recent_ids: Mutex::new(LruCache::new(NonZero::new(1000).expect("1000 is non-zero"))),
+            recent_ids: Mutex::new(LruCache::new(
+                NonZero::new(RECENT_MESSAGE_CACHE_CAPACITY)
+                    .expect("message cache capacity must be non-zero"),
+            )),
             rate_limiter: DashMap::new(),
         })
     }
@@ -67,7 +78,7 @@ impl Gateway {
     /// Returns when all channels have closed AND all in-flight messages have
     /// been processed (no orphaned tasks).
     pub async fn run(self: &Arc<Self>) -> anyhow::Result<()> {
-        let (tx, mut rx) = mpsc::channel::<InboundMessage>(256);
+        let (tx, mut rx) = mpsc::channel::<InboundMessage>(GATEWAY_MESSAGE_QUEUE_CAPACITY);
 
         // Spawn all channel listeners
         for ch in self.channels.values() {
@@ -83,12 +94,13 @@ impl Gateway {
         // Monitor queue depth periodically
         let tx_monitor = tx.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                GATEWAY_QUEUE_MONITOR_INTERVAL_SECS,
+            ));
             loop {
                 interval.tick().await;
                 let capacity = tx_monitor.capacity();
-                // Channel max capacity is 256; warn when less than 25% remains
-                if capacity < 64 {
+                if capacity < GATEWAY_QUEUE_PRESSURE_MIN_REMAINING_CAPACITY {
                     tracing::warn!(
                         remaining_capacity = capacity,
                         "gateway: message queue pressure — capacity below 25% / 网关: 消息队列压力 - 容量低于 25%"
@@ -103,7 +115,8 @@ impl Gateway {
         // Periodic GC for chat_locks and rate_limiter (every 60s instead of per-message)
         let gw_gc = self.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(GATEWAY_GC_INTERVAL_SECS));
             loop {
                 interval.tick().await;
                 // Remove chat locks with no active holders
@@ -159,11 +172,11 @@ impl Gateway {
     /// - "user": use sender_id only (each user has own global history)
     /// - "chat_user": use "chat_id::sender_id" (per-user history within each chat)
     fn session_key(&self, msg: &InboundMessage) -> String {
-        match self.config.memory.session_key_strategy.as_str() {
-            "user" => msg.sender_id.clone(),
-            "chat_user" => format!("{}::{}", msg.chat_id, msg.sender_id),
-            _ => msg.chat_id.clone(), // "chat" is default
-        }
+        build_session_key(
+            self.config.memory.session_key_strategy.as_str(),
+            &msg.chat_id,
+            &msg.sender_id,
+        )
     }
 
     /// O(1) channel lookup by name.
@@ -189,7 +202,7 @@ impl Gateway {
         let max_rpm = self.config.limits.max_requests_per_minute;
         if max_rpm > 0 {
             let now = Instant::now();
-            let window = std::time::Duration::from_secs(60);
+            let window = std::time::Duration::from_secs(GATEWAY_RATE_LIMIT_WINDOW_SECS);
             let mut entry = self.rate_limiter.entry(session_key.clone()).or_default();
             // Prune timestamps outside the window
             entry.retain(|t| now.duration_since(*t) < window);

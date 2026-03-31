@@ -6,6 +6,8 @@
 //! - Blocked directories are enforced in all modes.
 //! - A configurable timeout kills the process if it runs too long.
 
+mod permission;
+
 use anyhow::{Result, bail};
 #[cfg(target_os = "windows")]
 use encoding_rs::GBK;
@@ -16,49 +18,15 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use super::Tool;
-
-/// Built-in readonly commands — safe to run in any mode.
-const READONLY_COMMANDS: &[&str] = &[
-    "ls", "dir", "cat", "head", "tail", "grep", "find", "date", "whoami", "pwd", "wc", "sort",
-    "uniq", "echo", "file", "stat", "type", "where", "hostname", "uname", "df", "du", "env",
-    "printenv", "which",
-];
-
-/// Commands that are ALWAYS blocked regardless of permission level.
-const ALWAYS_BLOCKED: &[&str] = &[
-    "mkfs",
-    "dd",
-    "format",
-    "shutdown",
-    "reboot",
-    "init",
-    "systemctl",
-    "halt",
-    "poweroff",
-];
-
-const MANAGED_RUNTIME_COMMANDS: &[&str] = &["python", "python3", "pip", "pip3", "uv"];
+use super::tokenize::tokenize_quoted_args;
 const MANAGED_RUNTIME_TIMEOUT_SECS: u64 = 300;
 const LOG_PREVIEW_CHARS: usize = 240;
 #[cfg(target_os = "windows")]
 const WINDOWS_SHELL_BUILTINS: &[&str] = &["echo", "dir", "type", "cd", "set"];
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum PermissionLevel {
-    Readonly,
-    Supervised,
-    Full,
-}
-
-impl PermissionLevel {
-    pub fn parse(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "readonly" => Self::Readonly,
-            "full" => Self::Full,
-            _ => Self::Supervised, // default
-        }
-    }
-}
+pub use permission::PermissionLevel;
+pub use permission::split_command_chain;
+use permission::{ALWAYS_BLOCKED, MANAGED_RUNTIME_COMMANDS, READONLY_COMMANDS};
 
 #[derive(Clone)]
 pub struct ShellExec {
@@ -196,63 +164,7 @@ impl ShellExec {
     }
 
     fn tokenize_command_segment(command: &str) -> Result<Vec<String>> {
-        let mut tokens = Vec::new();
-        let mut current = String::new();
-        let mut chars = command.chars().peekable();
-        let mut in_single_quote = false;
-        let mut in_double_quote = false;
-
-        while let Some(c) = chars.next() {
-            if in_single_quote {
-                if c == '\'' {
-                    in_single_quote = false;
-                } else {
-                    current.push(c);
-                }
-                continue;
-            }
-
-            if in_double_quote {
-                if c == '\\' {
-                    if let Some(&next) = chars.peek() {
-                        if next == '"' || next == '\\' {
-                            current.push(chars.next().unwrap());
-                        } else {
-                            current.push(c);
-                        }
-                    } else {
-                        current.push(c);
-                    }
-                } else if c == '"' {
-                    in_double_quote = false;
-                } else {
-                    current.push(c);
-                }
-                continue;
-            }
-
-            match c {
-                '\'' => in_single_quote = true,
-                '"' => in_double_quote = true,
-                c if c.is_whitespace() => {
-                    if !current.is_empty() {
-                        tokens.push(std::mem::take(&mut current));
-                    }
-                }
-                _ => current.push(c),
-            }
-        }
-
-        if in_single_quote || in_double_quote {
-            bail!("unclosed quote in command / 命令中有未闭合的引号")
-        }
-        if !current.is_empty() {
-            tokens.push(current);
-        }
-        if tokens.is_empty() {
-            bail!("empty command / 空命令")
-        }
-        Ok(tokens)
+        tokenize_quoted_args(command)
     }
 
     fn token_candidate_path(&self, token: &str) -> Option<PathBuf> {
@@ -1003,115 +915,6 @@ impl ShellExec {
     }
 }
 
-/// Split a command string into sub-commands by shell operators.
-///
-/// Splits on `|`, `&&`, `||` (all platforms).
-/// Unix additionally splits on `;`.
-/// Windows additionally splits on single `&` (but not `&&`).
-/// Quoted sections (single or double quotes) are preserved as-is.
-pub fn split_command_chain(command: &str) -> Vec<String> {
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut chars = command.chars().peekable();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-
-    while let Some(c) = chars.next() {
-        if in_single_quote {
-            current.push(c);
-            if c == '\'' {
-                in_single_quote = false;
-            }
-            continue;
-        }
-        if in_double_quote {
-            if c == '\\' {
-                current.push(c);
-                if let Some(&next) = chars.peek()
-                    && (next == '"' || next == '\\')
-                {
-                    current.push(chars.next().unwrap());
-                }
-            } else if c == '"' {
-                current.push(c);
-                in_double_quote = false;
-            } else {
-                current.push(c);
-            }
-            continue;
-        }
-
-        match c {
-            '\'' => {
-                current.push(c);
-                in_single_quote = true;
-            }
-            '"' => {
-                current.push(c);
-                in_double_quote = true;
-            }
-            '|' => {
-                if chars.peek() == Some(&'|') {
-                    chars.next(); // consume second |
-                }
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    segments.push(trimmed);
-                }
-                current.clear();
-            }
-            '&' => {
-                if chars.peek() == Some(&'&') {
-                    chars.next(); // consume second &
-                    let trimmed = current.trim().to_string();
-                    if !trimmed.is_empty() {
-                        segments.push(trimmed);
-                    }
-                    current.clear();
-                } else {
-                    // Single & — split on Windows only
-                    #[cfg(target_os = "windows")]
-                    {
-                        let trimmed = current.trim().to_string();
-                        if !trimmed.is_empty() {
-                            segments.push(trimmed);
-                        }
-                        current.clear();
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        current.push(c);
-                    }
-                }
-            }
-            ';' => {
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let trimmed = current.trim().to_string();
-                    if !trimmed.is_empty() {
-                        segments.push(trimmed);
-                    }
-                    current.clear();
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    current.push(c);
-                }
-            }
-            _ => {
-                current.push(c);
-            }
-        }
-    }
-
-    let trimmed = current.trim().to_string();
-    if !trimmed.is_empty() {
-        segments.push(trimmed);
-    }
-
-    segments
-}
-
 impl Tool for ShellExec {
     fn name(&self) -> &str {
         "shell_exec"
@@ -1306,9 +1109,11 @@ mod tests {
     #[tokio::test]
     async fn test_check_chain_allows_safe() {
         let shell = make_shell("full");
-        let args = serde_json::json!({ "command": "echo hello | grep hello" });
-        let result = shell.do_execute(args).await;
-        assert!(result.is_ok());
+        #[cfg(target_os = "windows")]
+        let command = "echo hello | findstr hello";
+        #[cfg(not(target_os = "windows"))]
+        let command = "echo hello | grep hello";
+        assert!(shell.check_command_chain(command).is_ok());
     }
 
     #[test]

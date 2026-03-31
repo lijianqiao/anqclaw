@@ -35,28 +35,7 @@ pub fn run_show(cli_config: Option<&str>) -> anyhow::Result<()> {
         )
     })?;
     let mut config = AppConfig::load(config_str)?;
-
-    // Resolve paths for display
-    config.app.workspace = resolve_path(&home, &config.app.workspace)
-        .to_string_lossy()
-        .into_owned();
-    config.memory.db_path = resolve_path(&home, &config.memory.db_path)
-        .to_string_lossy()
-        .into_owned();
-    config.tools.file_access_dir = resolve_path(&home, &config.tools.file_access_dir)
-        .to_string_lossy()
-        .into_owned();
-    config.agent.venv_path = resolve_path(&home, &config.agent.venv_path)
-        .to_string_lossy()
-        .into_owned();
-    if !config.app.log_file.is_empty() {
-        config.app.log_file = resolve_path(&home, &config.app.log_file)
-            .to_string_lossy()
-            .into_owned();
-    }
-    config.audit.log_file = resolve_path(&home, &config.audit.log_file)
-        .to_string_lossy()
-        .into_owned();
+    config.resolve_paths_against(&home);
 
     println!("\x1b[1m[app]\x1b[0m");
     println!("  name       = {}", config.app.name);

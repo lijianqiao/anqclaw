@@ -13,6 +13,39 @@ use super::Tool;
 
 // ─── Shared helper ───────────────────────────────────────────────────────────
 
+struct PathAccessPolicy {
+    sandbox: PathBuf,
+    blocked_dirs: Vec<String>,
+    trusted_dirs: Vec<PathBuf>,
+}
+
+impl PathAccessPolicy {
+    fn new(file_access_dir: &str, blocked_dirs: Vec<String>, trusted_dirs: Vec<String>) -> Self {
+        Self {
+            sandbox: PathBuf::from(file_access_dir),
+            blocked_dirs,
+            trusted_dirs: prepare_trusted_dirs(trusted_dirs),
+        }
+    }
+
+    fn resolve_tool_path(&self, user_path: &str) -> Result<PathBuf> {
+        let normalized_path = normalize_tool_path(user_path);
+        resolve_tool_path(&self.sandbox, &self.trusted_dirs, &normalized_path)
+    }
+
+    fn check_blocked(&self, path: &Path) -> Result<()> {
+        check_blocked_dirs(path, &self.blocked_dirs)
+    }
+}
+
+fn prepare_trusted_dirs(trusted_dirs: Vec<String>) -> Vec<PathBuf> {
+    trusted_dirs
+        .into_iter()
+        .map(|dir| crate::paths::resolve_configured_path(&dir))
+        .filter_map(|dir| crate::paths::canonicalize_for_comparison(&dir).ok())
+        .collect()
+}
+
 /// Resolves `user_path` relative to `sandbox` and ensures the result is inside
 /// the sandbox after canonicalisation.
 ///
@@ -79,6 +112,29 @@ fn resolve_safe_path(sandbox: &Path, user_path: &str) -> Result<PathBuf> {
     }
 
     Ok(canonical)
+}
+
+fn resolve_tool_path(
+    sandbox: &Path,
+    trusted_dirs: &[PathBuf],
+    normalized_path: &str,
+) -> Result<PathBuf> {
+    let path = resolve_safe_path(sandbox, normalized_path);
+    match path {
+        Ok(path) => Ok(path),
+        Err(_) => {
+            let abs = if Path::new(normalized_path).is_absolute() {
+                PathBuf::from(normalized_path)
+            } else {
+                sandbox.join(normalized_path)
+            };
+            if crate::paths::path_is_trusted(&abs, trusted_dirs) {
+                Ok(abs)
+            } else {
+                resolve_safe_path(sandbox, normalized_path)
+            }
+        }
+    }
 }
 
 fn is_script_like_path(path: &str) -> bool {
@@ -205,9 +261,7 @@ fn detect_binary_format(bytes: &[u8]) -> Option<&'static str> {
 // ─── file_read ───────────────────────────────────────────────────────────────
 
 pub struct FileRead {
-    sandbox: PathBuf,
-    blocked_dirs: Vec<String>,
-    trusted_dirs: Vec<PathBuf>,
+    policy: PathAccessPolicy,
 }
 
 impl FileRead {
@@ -217,13 +271,7 @@ impl FileRead {
         trusted_dirs: Vec<String>,
     ) -> Self {
         Self {
-            sandbox: PathBuf::from(file_access_dir),
-            blocked_dirs,
-            trusted_dirs: trusted_dirs
-                .into_iter()
-                .map(|dir| crate::paths::resolve_configured_path(&dir))
-                .filter_map(|dir| crate::paths::canonicalize_for_comparison(&dir).ok())
-                .collect(),
+            policy: PathAccessPolicy::new(file_access_dir, blocked_dirs, trusted_dirs),
         }
     }
 
@@ -232,40 +280,23 @@ impl FileRead {
     /// Maximum chars for lossy fallback output
     const LOSSY_MAX_CHARS: usize = 2000;
 
-    fn is_trusted(&self, path: &Path) -> bool {
-        crate::paths::path_is_trusted(path, &self.trusted_dirs)
-    }
-
     async fn do_execute(&self, args: serde_json::Value) -> Result<String> {
         let path_str = args
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing `path` parameter / 缺少 `path` 参数"))?;
 
-        let normalized_path = normalize_tool_path(path_str);
-
-        let path = resolve_safe_path(&self.sandbox, &normalized_path);
-        let path = match path {
-            Ok(p) => p,
-            Err(_) => {
-                let abs = if Path::new(&normalized_path).is_absolute() {
-                    PathBuf::from(&normalized_path)
-                } else {
-                    self.sandbox.join(&normalized_path)
-                };
-                if self.is_trusted(&abs) {
-                    abs
-                } else {
-                    resolve_safe_path(&self.sandbox, &normalized_path)?
-                }
-            }
-        };
-        check_blocked_dirs(&path, &self.blocked_dirs)?;
+        let path = self.policy.resolve_tool_path(path_str)?;
+        self.policy.check_blocked(&path)?;
 
         // Step 0: File size pre-check
-        let metadata = tokio::fs::metadata(&path)
-            .await
-            .map_err(|e| anyhow::anyhow!("stat `{}`: {e} / 获取文件信息 `{}` 失败: {e}", path.display(), path.display()))?;
+        let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
+            anyhow::anyhow!(
+                "stat `{}`: {e} / 获取文件信息 `{}` 失败: {e}",
+                path.display(),
+                path.display()
+            )
+        })?;
         let file_size = metadata.len();
         if file_size > Self::FILE_READ_MAX_SIZE {
             return Ok(format!(
@@ -277,9 +308,13 @@ impl FileRead {
         }
 
         // Step 1: Read raw bytes once (avoids double-read of read_to_string then read)
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| anyhow::anyhow!("read `{}`: {e} / 读取文件 `{}` 失败: {e}", path.display(), path.display()))?;
+        let bytes = tokio::fs::read(&path).await.map_err(|e| {
+            anyhow::anyhow!(
+                "read `{}`: {e} / 读取文件 `{}` 失败: {e}",
+                path.display(),
+                path.display()
+            )
+        })?;
 
         // Step 2: Try UTF-8 conversion (zero-copy if valid)
         match String::from_utf8(bytes) {
@@ -339,7 +374,7 @@ impl Tool for FileRead {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file. The path must be inside the workspace directory. Use paths relative to the workspace root; generated scripts should usually live under script/."
+        "Read the contents of a file. The path must be inside the workspace directory. Use paths relative to the workspace root; generated scripts should usually live under script/. / 读取文件内容。路径必须在工作区目录内。使用相对于工作区根目录的路径；生成的脚本通常应该放在 script/ 目录下。"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -348,7 +383,7 @@ impl Tool for FileRead {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path (relative to workspace or absolute)"
+                    "description": "File path (relative to workspace or absolute) / 文件路径（相对于工作区或绝对路径）"
                 }
             },
             "required": ["path"]
@@ -366,9 +401,7 @@ impl Tool for FileRead {
 // ─── file_write ──────────────────────────────────────────────────────────────
 
 pub struct FileWrite {
-    sandbox: PathBuf,
-    blocked_dirs: Vec<String>,
-    trusted_dirs: Vec<PathBuf>,
+    policy: PathAccessPolicy,
 }
 
 impl FileWrite {
@@ -378,18 +411,8 @@ impl FileWrite {
         trusted_dirs: Vec<String>,
     ) -> Self {
         Self {
-            sandbox: PathBuf::from(file_access_dir),
-            blocked_dirs,
-            trusted_dirs: trusted_dirs
-                .into_iter()
-                .map(|dir| crate::paths::resolve_configured_path(&dir))
-                .filter_map(|dir| crate::paths::canonicalize_for_comparison(&dir).ok())
-                .collect(),
+            policy: PathAccessPolicy::new(file_access_dir, blocked_dirs, trusted_dirs),
         }
-    }
-
-    fn is_trusted(&self, path: &Path) -> bool {
-        crate::paths::path_is_trusted(path, &self.trusted_dirs)
     }
 
     async fn do_execute(&self, args: serde_json::Value) -> Result<String> {
@@ -398,37 +421,26 @@ impl FileWrite {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing `path` parameter / 缺少 `path` 参数"))?;
 
-        let normalized_path = normalize_tool_path(path_str);
-
         let content = args
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing `content` parameter / 缺少 `content` 参数"))?;
 
-        let path = resolve_safe_path(&self.sandbox, &normalized_path);
-        let path = match path {
-            Ok(p) => p,
-            Err(_) => {
-                let abs = if Path::new(&normalized_path).is_absolute() {
-                    PathBuf::from(&normalized_path)
-                } else {
-                    self.sandbox.join(&normalized_path)
-                };
-                if self.is_trusted(&abs) {
-                    abs
-                } else {
-                    resolve_safe_path(&self.sandbox, &normalized_path)?
-                }
-            }
-        };
-        check_blocked_dirs(&path, &self.blocked_dirs)?;
+        let path = self.policy.resolve_tool_path(path_str)?;
+        self.policy.check_blocked(&path)?;
 
-        tokio::fs::write(&path, content)
-            .await
-            .map_err(|e| anyhow::anyhow!("write `{}`: {e} / 写入文件 `{}` 失败: {e}", path.display(), path.display()))?;
+        tokio::fs::write(&path, content).await.map_err(|e| {
+            anyhow::anyhow!(
+                "write `{}`: {e} / 写入文件 `{}` 失败: {e}",
+                path.display(),
+                path.display()
+            )
+        })?;
 
         Ok(format!(
-            "Written {} bytes to {}",
+            "Written {} bytes to {} / 已写入 {} 字节到 {}",
+            content.len(),
+            path.display(),
             content.len(),
             path.display()
         ))
@@ -441,7 +453,7 @@ impl Tool for FileWrite {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file. The path must be inside the workspace directory. Use paths relative to the workspace root; generated scripts should usually live under script/. Parent directories are created automatically."
+        "Write content to a file. The path must be inside the workspace directory. Use paths relative to the workspace root; generated scripts should usually live under script/. Parent directories are created automatically. / 将内容写入文件。路径必须在工作区目录内。使用相对于工作区根目录的路径；生成的脚本通常应位于 script/ 下。父目录会自动创建。"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -450,11 +462,11 @@ impl Tool for FileWrite {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path (relative to workspace or absolute)"
+                    "description": "File path (relative to workspace or absolute) / 文件路径（相对于工作区或绝对路径）"
                 },
                 "content": {
                     "type": "string",
-                    "description": "Content to write to the file"
+                    "description": "Content to write to the file / 要写入文件的内容"
                 }
             },
             "required": ["path", "content"]
@@ -588,8 +600,14 @@ mod tests {
             vec![trusted.to_string_lossy().to_string()],
         );
 
-        assert!(reader.is_trusted(&trusted.join("ok.txt")));
-        assert!(!reader.is_trusted(&sibling.join("not-ok.txt")));
+        assert!(crate::paths::path_is_trusted(
+            &trusted.join("ok.txt"),
+            &reader.policy.trusted_dirs
+        ));
+        assert!(!crate::paths::path_is_trusted(
+            &sibling.join("not-ok.txt"),
+            &reader.policy.trusted_dirs
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

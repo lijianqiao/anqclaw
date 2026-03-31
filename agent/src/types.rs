@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
+use crate::token;
+
 // ─── Inbound Message ────────────────────────────────────────────────────────
 
 /// Inbound message (from channel to gateway)
@@ -78,31 +80,6 @@ impl MessageContent {
             MessageContent::RichText(_) => Cow::Borrowed("[富文本消息]"),
         }
     }
-
-    /// Extracts image data if this is an Image variant with populated data.
-    #[allow(dead_code)]
-    pub fn image_data(&self) -> Option<&ImageData> {
-        match self {
-            MessageContent::Image {
-                image_data: Some(data),
-                ..
-            } => Some(data),
-            _ => None,
-        }
-    }
-
-    /// Extracts file bytes if this is a File variant with populated data.
-    #[allow(dead_code)]
-    pub fn file_bytes(&self) -> Option<(&str, &[u8])> {
-        match self {
-            MessageContent::File {
-                name,
-                file_bytes: Some(bytes),
-                ..
-            } => Some((name.as_str(), bytes)),
-            _ => None,
-        }
-    }
 }
 
 // ─── Outbound Message ────────────────────────────────────────────────────────
@@ -157,6 +134,8 @@ pub struct ToolResult {
     pub call_id: String,
     pub output: String,
     pub is_error: bool,
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,80 +157,73 @@ pub struct ChatMessage {
     /// Optional image attachments (only used for User messages with vision).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<ImageData>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) estimated_tokens: Option<usize>,
 }
 
 impl ChatMessage {
-    /// Creates a System role message.
-    pub fn system(content: &str) -> Self {
+    fn new(role: Role, content: String) -> Self {
         Self {
-            role: Role::System,
-            content: content.to_string(),
+            role,
+            content,
             tool_calls: None,
             tool_call_id: None,
             images: None,
+            estimated_tokens: None,
         }
+    }
+
+    /// Creates a System role message.
+    pub fn system(content: &str) -> Self {
+        Self::new(Role::System, content.to_string())
     }
 
     /// Creates a User role message.
     #[allow(dead_code)]
     pub fn user(content: &str) -> Self {
-        Self {
-            role: Role::User,
-            content: content.to_string(),
-            tool_calls: None,
-            tool_call_id: None,
-            images: None,
-        }
+        Self::new(Role::User, content.to_string())
     }
 
     /// Creates a User role message with image attachments.
     /// Accepts a slice to avoid forcing callers to clone; only clones internally
     /// when images are present.
     pub fn user_with_images(content: &str, images: &[ImageData]) -> Self {
-        Self {
-            role: Role::User,
-            content: content.to_string(),
-            tool_calls: None,
-            tool_call_id: None,
-            images: if images.is_empty() {
-                None
-            } else {
-                Some(images.to_vec())
-            },
-        }
+        let mut message = Self::new(Role::User, content.to_string());
+        message.images = if images.is_empty() {
+            None
+        } else {
+            Some(images.to_vec())
+        };
+        message
     }
 
     /// Creates an Assistant role message with no tool calls.
     pub fn assistant(content: &str) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: content.to_string(),
-            tool_calls: None,
-            tool_call_id: None,
-            images: None,
-        }
+        Self::new(Role::Assistant, content.to_string())
     }
 
     /// Creates an Assistant role message that includes tool calls.
     pub fn assistant_with_tools(text: Option<&str>, calls: &[ToolCall]) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: text.unwrap_or("").to_string(),
-            tool_calls: Some(calls.to_vec()),
-            tool_call_id: None,
-            images: None,
-        }
+        let mut message = Self::new(Role::Assistant, text.unwrap_or("").to_string());
+        message.tool_calls = Some(calls.to_vec());
+        message
     }
 
     /// Creates a Tool role message from a ToolResult.
     pub fn tool_result(result: &ToolResult) -> Self {
-        Self {
-            role: Role::Tool,
-            content: result.output.clone(),
-            tool_calls: None,
-            tool_call_id: Some(result.call_id.clone()),
-            images: None,
-        }
+        let mut message = Self::new(Role::Tool, result.output.clone());
+        message.tool_call_id = Some(result.call_id.clone());
+        message
+    }
+
+    pub fn estimated_tokens(&self) -> Option<usize> {
+        self.estimated_tokens
+    }
+
+    pub fn estimate_tokens_cached(&mut self) -> usize {
+        *self
+            .estimated_tokens
+            .get_or_insert_with(|| token::estimate_message_tokens("msg", &self.content))
     }
 }
 

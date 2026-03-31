@@ -7,10 +7,12 @@ pub mod context;
 pub mod probe;
 pub mod prompt;
 pub mod redact;
+mod token_budget;
 
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -19,12 +21,12 @@ use crate::config::AppConfig;
 use crate::llm::{LlmClient, create_llm_client};
 use crate::memory::MemoryStore;
 use crate::skill::{SkillMeta, SkillRegistry};
-use crate::token;
 use crate::tool::ToolRegistry;
 use crate::types::{ChatMessage, InboundMessage, OutboundMessage, StreamEvent};
 
 use context::{build_system_prompt, format_memories};
 use probe::EnvironmentProbe;
+use token_budget::trim_messages_to_budget;
 
 // ─── AgentCore ───────────────────────────────────────────────────────────────
 
@@ -39,6 +41,13 @@ pub struct AgentCore {
     audit: Option<Arc<AuditLogger>>,
     skill_registry: Option<Arc<SkillRegistry>>,
     env_probe: EnvironmentProbe,
+    workspace_extensions_cache: std::sync::RwLock<Option<WorkspaceExtensionsCache>>,
+}
+
+#[derive(Clone)]
+struct WorkspaceExtensionsCache {
+    cached_at: Instant,
+    extensions: HashSet<String>,
 }
 
 #[derive(Default)]
@@ -99,6 +108,10 @@ const DESCRIPTION_STOPWORDS: &[&str] = &[
     "those",
 ];
 
+const RECENT_HISTORY_MESSAGE_LIMIT: usize = 8;
+const WORKSPACE_EXTENSION_SCAN_LIMIT: usize = 256;
+const WORKSPACE_EXTENSIONS_CACHE_TTL: Duration = Duration::from_secs(60);
+
 impl AgentCore {
     #[cfg(test)]
     fn select_skill_candidates(&self, user_text: &str, history: &[ChatMessage]) -> Vec<SkillMeta> {
@@ -150,7 +163,7 @@ impl AgentCore {
             .iter()
             .rev()
             .filter(|message| message.role != crate::types::Role::System)
-            .take(8)
+            .take(RECENT_HISTORY_MESSAGE_LIMIT)
             .map(|message| message.content.to_lowercase())
             .collect();
         let history_text = history_messages.join("\n");
@@ -162,14 +175,40 @@ impl AgentCore {
 
         SkillCandidateContext {
             recent_file_tokens: extract_file_like_tokens(&combined_text),
-            workspace_extensions: collect_workspace_extensions(
-                Path::new(&self.config.app.workspace),
-                256,
-            ),
+            workspace_extensions: self.cached_workspace_extensions(),
             user_text,
             history_text,
             combined_text,
         }
+    }
+
+    fn cached_workspace_extensions(&self) -> HashSet<String> {
+        if let Ok(cache_guard) = self.workspace_extensions_cache.read()
+            && let Some(cache) = cache_guard.as_ref()
+            && cache.cached_at.elapsed() < WORKSPACE_EXTENSIONS_CACHE_TTL
+        {
+            return cache.extensions.clone();
+        }
+
+        let extensions = collect_workspace_extensions(
+            Path::new(&self.config.app.workspace),
+            WORKSPACE_EXTENSION_SCAN_LIMIT,
+        );
+        let refreshed_cache = WorkspaceExtensionsCache {
+            cached_at: Instant::now(),
+            extensions: extensions.clone(),
+        };
+
+        match self.workspace_extensions_cache.write() {
+            Ok(mut cache_guard) => {
+                *cache_guard = Some(refreshed_cache);
+            }
+            Err(poisoned) => {
+                *poisoned.into_inner() = Some(refreshed_cache);
+            }
+        }
+
+        extensions
     }
 
     fn score_skill_candidate(
@@ -182,16 +221,16 @@ impl AgentCore {
 
         let mut score = skill.priority;
         let mut matched = false;
-        let skill_name = skill.name.trim().to_lowercase();
+        let skill_name = skill.normalized_name();
         let mut description_match = false;
         let mut extension_match = false;
 
         if !skill_name.is_empty() {
-            if context.user_text.contains(&skill_name) {
+            if context.user_text.contains(skill_name) {
                 score += 120;
                 matched = true;
             }
-            if context.history_text.contains(&skill_name) {
+            if context.history_text.contains(skill_name) {
                 score += 60;
                 matched = true;
             }
@@ -205,22 +244,22 @@ impl AgentCore {
         }
 
         for keyword in skill.keyword_terms() {
-            if context.user_text.contains(&keyword) {
+            if context.user_text.contains(keyword.as_str()) {
                 score += 80;
                 matched = true;
             }
-            if context.history_text.contains(&keyword) {
+            if context.history_text.contains(keyword.as_str()) {
                 score += 40;
                 matched = true;
             }
         }
 
         for trigger in skill.trigger_terms() {
-            if context.user_text.contains(&trigger) {
+            if context.user_text.contains(trigger.as_str()) {
                 score += 40;
                 matched = true;
             }
-            if context.history_text.contains(&trigger) {
+            if context.history_text.contains(trigger.as_str()) {
                 score += 20;
                 matched = true;
             }
@@ -245,16 +284,16 @@ impl AgentCore {
         skill: &SkillMeta,
         context: &SkillCandidateContext,
     ) -> MatchSignalScore {
-        let description = skill.description.trim().to_lowercase();
+        let description = skill.normalized_description();
         if description.is_empty() {
             return MatchSignalScore::default();
         }
 
         let mut score = 0;
-        if context.user_text.contains(&description) {
+        if context.user_text.contains(description) {
             score += 50;
         } else {
-            let terms = extract_description_terms(&description);
+            let terms = extract_description_terms(description);
             if terms.iter().any(|term| context.user_text.contains(term)) {
                 score += 50;
             }
@@ -267,7 +306,7 @@ impl AgentCore {
             };
         }
 
-        if context.history_text.contains(&description) {
+        if context.history_text.contains(description) {
             score += 25;
         }
         MatchSignalScore {
@@ -283,16 +322,16 @@ impl AgentCore {
         let mut score = 0;
 
         for extension in skill.extension_terms() {
-            if context.combined_text.contains(&extension)
+            if context.combined_text.contains(extension.as_str())
                 || context
                     .recent_file_tokens
                     .iter()
-                    .any(|token| token.ends_with(&extension))
+                    .any(|token| token.ends_with(extension.as_str()))
             {
                 score += 90;
             }
 
-            if context.workspace_extensions.contains(&extension) {
+            if context.workspace_extensions.contains(extension.as_str()) {
                 score += 15;
             }
         }
@@ -372,6 +411,7 @@ impl AgentCore {
             audit,
             skill_registry,
             env_probe,
+            workspace_extensions_cache: std::sync::RwLock::new(None),
         }
     }
 
@@ -498,68 +538,29 @@ impl AgentCore {
         let user_msg = ChatMessage::user_with_images(&user_text, &msg.images);
         messages.push(user_msg);
 
-        // Token budget: trim history if it exceeds max_tokens_per_conversation
-        let token_budget = self.config.limits.max_tokens_per_conversation;
-        if token_budget > 0 {
-            // Single-pass: compute per-message token counts once
-            let msg_tokens: Vec<usize> = messages
-                .iter()
-                .map(|m| token::estimate_message_tokens("msg", &m.content))
-                .collect();
-            let total_tokens: usize = msg_tokens.iter().sum();
-
-            if total_tokens as u64 > token_budget {
-                // Find where system messages end
-                let system_end = messages
-                    .iter()
-                    .position(|m| !matches!(m.role, crate::types::Role::System))
-                    .unwrap_or(messages.len());
-
-                // Keep: system messages + last message (current user). Trim history from oldest.
-                let system_tokens: usize = msg_tokens[..system_end].iter().sum();
-                let last_tokens = *msg_tokens.last().unwrap_or(&0);
-                let budget_for_history =
-                    token_budget.saturating_sub(system_tokens as u64 + last_tokens as u64);
-
-                let history_end = messages.len().saturating_sub(1);
-
-                if budget_for_history == 0 {
-                    // System + last message already exceed budget; remove all history
-                    let remove_count = history_end - system_end;
-                    if remove_count > 0 {
-                        messages.drain(system_end..history_end);
-                        tracing::warn!(
-                            trimmed = remove_count,
-                            total_est = total_tokens,
-                            budget = token_budget,
-                            "all history trimmed — system prompt + user message exceed token budget / 所有历史已裁剪 - 系统提示 + 用户消息超出令牌预算"
-                        );
-                    }
-                } else {
-                    // Scan history from newest to oldest
-                    let mut accumulated = 0u64;
-                    let mut keep_from = system_end;
-                    for i in (system_end..history_end).rev() {
-                        let tok = msg_tokens[i] as u64;
-                        if accumulated + tok > budget_for_history {
-                            keep_from = i + 1;
-                            break;
-                        }
-                        accumulated += tok;
-                        keep_from = i;
-                    }
-
-                    let remove_count = keep_from - system_end;
-                    if remove_count > 0 {
-                        messages.drain(system_end..keep_from);
-                        tracing::info!(
-                            trimmed = remove_count,
-                            total_est = total_tokens,
-                            budget = token_budget,
-                            "history trimmed to fit token budget / 历史已裁剪以适应令牌预算"
-                        );
-                    }
-                }
+        if let Some(trimmed) = trim_messages_to_budget(
+            &mut messages,
+            self.config.limits.max_tokens_per_conversation,
+        ) {
+            let log_message = if trimmed.trimmed_all_history {
+                "all history trimmed — system prompt + user message exceed token budget / 所有历史已裁剪 - 系统提示 + 用户消息超出令牌预算"
+            } else {
+                "history trimmed to fit token budget / 历史已裁剪以适应令牌预算"
+            };
+            if trimmed.trimmed_all_history {
+                tracing::warn!(
+                    trimmed = trimmed.removed_messages,
+                    total_est = trimmed.total_tokens,
+                    budget = trimmed.budget,
+                    "{log_message}"
+                );
+            } else {
+                tracing::info!(
+                    trimmed = trimmed.removed_messages,
+                    total_est = trimmed.total_tokens,
+                    budget = trimmed.budget,
+                    "{log_message}"
+                );
             }
         }
 
@@ -594,12 +595,21 @@ impl AgentCore {
                 };
                 let mut partial_text = String::new();
                 let mut final_resp = None;
+                let mut receiver_dropped = false;
                 while let Some(event) = rx.recv().await {
                     match event {
                         StreamEvent::Delta(text) => {
                             partial_text.push_str(&text);
-                            if let Some(ref tx) = stream_tx {
-                                let _ = tx.send(text).await;
+                            if let Some(ref tx) = stream_tx
+                                && tx.send(text).await.is_err()
+                            {
+                                receiver_dropped = true;
+                                tracing::info!(
+                                    round,
+                                    chars = partial_text.chars().count(),
+                                    "stream receiver dropped, stopping agent loop early / 流接收端已断开，提前停止 agent 循环"
+                                );
+                                break;
                             }
                         }
                         StreamEvent::Done(resp) => {
@@ -607,22 +617,29 @@ impl AgentCore {
                         }
                     }
                 }
-                match final_resp {
-                    Some(resp) => resp,
-                    None if !partial_text.is_empty() => {
-                        tracing::warn!(
-                            chars = partial_text.chars().count(),
-                            "stream ended without Done event, returning partial text / 流未收到 Done 事件，返回部分文本"
-                        );
-                        crate::types::LlmResponse {
-                            text: Some(partial_text),
-                            tool_calls: vec![],
-                        }
+                if receiver_dropped {
+                    crate::types::LlmResponse {
+                        text: Some(partial_text),
+                        tool_calls: vec![],
                     }
-                    None => {
-                        return Err(anyhow::anyhow!(
-                            "stream ended without Done event / 流未收到 Done 事件"
-                        ));
+                } else {
+                    match final_resp {
+                        Some(resp) => resp,
+                        None if !partial_text.is_empty() => {
+                            tracing::warn!(
+                                chars = partial_text.chars().count(),
+                                "stream ended without Done event, returning partial text / 流未收到 Done 事件，返回部分文本"
+                            );
+                            crate::types::LlmResponse {
+                                text: Some(partial_text),
+                                tool_calls: vec![],
+                            }
+                        }
+                        None => {
+                            return Err(anyhow::anyhow!(
+                                "stream ended without Done event / 流未收到 Done 事件"
+                            ));
+                        }
                     }
                 }
             } else {
@@ -672,16 +689,13 @@ impl AgentCore {
                     "executing tool calls / 执行工具调用"
                 );
 
-                // Execute all tool calls concurrently (with timing)
-                let tools_start = std::time::Instant::now();
+                // Execute all tool calls concurrently.
                 let mut results = self.tools.execute_batch(&response.tool_calls).await;
-                let tools_duration_ms = tools_start.elapsed().as_millis() as u64;
 
                 // Audit: log each tool call (with redaction)
                 if let Some(ref audit) = self.audit
                     && self.config.audit.log_tool_calls
                 {
-                    let per_tool_ms = tools_duration_ms / results.len().max(1) as u64;
                     for (call, result) in response.tool_calls.iter().zip(results.iter()) {
                         // Respect fine-grained audit flags
                         if call.name == "shell_exec" && !self.config.audit.log_shell_commands {
@@ -722,7 +736,7 @@ impl AgentCore {
                             &redacted_args,
                             &redacted_output,
                             result.is_error,
-                            per_tool_ms,
+                            result.duration_ms,
                         );
                     }
                 }
@@ -1044,6 +1058,7 @@ fn push_description_term(current: &mut String, terms: &mut HashSet<String>) {
 
 #[cfg(test)]
 mod tests {
+    use super::token_budget::trim_messages_to_budget;
     use super::*;
     use crate::config::AppConfig;
     use crate::types::{LlmResponse, MessageContent, ToolCall, ToolDefinition};
@@ -1278,6 +1293,110 @@ max_tool_rounds = 3
 
         assert_eq!(reply.content, "处理中断前的部分回复");
         assert_eq!(rx.recv().await.as_deref(), Some("处理中断前的部分回复"));
+        assert_eq!(persist.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_cached_workspace_extensions_reuses_recent_scan() {
+        let workspace = std::env::temp_dir().join("anqclaw_workspace_extension_cache_test");
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("first.txt"), "hello").unwrap();
+
+        let memory = test_memory().await;
+        let config = test_config_with_workspace(&workspace);
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+        }]));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            None,
+            vec![],
+            None,
+        ));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+
+        let first = agent.cached_workspace_extensions();
+        std::fs::write(workspace.join("second.py"), "print('hi')").unwrap();
+        let second = agent.cached_workspace_extensions();
+
+        assert!(first.contains(".txt"));
+        assert_eq!(first, second);
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn test_trim_messages_to_budget_populates_cached_token_estimates() {
+        let mut messages = vec![
+            ChatMessage::system("system prompt"),
+            ChatMessage::assistant("older assistant reply"),
+            ChatMessage::user("follow-up question from history"),
+            ChatMessage::user("current user request"),
+        ];
+        let total_tokens: usize = messages
+            .iter_mut()
+            .map(ChatMessage::estimate_tokens_cached)
+            .sum();
+
+        for message in &mut messages {
+            assert!(message.estimated_tokens().is_some());
+        }
+
+        let trimmed = trim_messages_to_budget(&mut messages, total_tokens.saturating_sub(1) as u64)
+            .expect("history should be trimmed when budget is smaller than total tokens");
+
+        assert!(trimmed.removed_messages > 0);
+        assert_eq!(
+            messages.first().map(|message| &message.role),
+            Some(&crate::types::Role::System)
+        );
+        assert_eq!(
+            messages.last().map(|message| &message.role),
+            Some(&crate::types::Role::User)
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.estimated_tokens().is_some())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_streaming_stops_when_receiver_drops() {
+        let memory = test_memory().await;
+        let config = test_config();
+
+        let mock_llm = Arc::new(MockLlm::with_stream(vec![
+            StreamEvent::Delta("第一段".into()),
+            StreamEvent::Delta("第二段".into()),
+            StreamEvent::Done(LlmResponse {
+                text: Some("完整回复".into()),
+                tool_calls: vec![],
+            }),
+        ]));
+
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            None,
+            vec![],
+            None,
+        ));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+
+        let (reply, persist) = agent.handle_streaming(&test_inbound(), &[], tx).await;
+
+        assert_eq!(reply.content, "第一段");
         assert_eq!(persist.len(), 2);
     }
 

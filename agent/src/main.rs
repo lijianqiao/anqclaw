@@ -14,6 +14,7 @@ mod llm;
 mod memory;
 mod metrics;
 mod paths;
+mod session;
 mod scheduler;
 mod skill;
 mod token;
@@ -33,7 +34,7 @@ use crate::channel::cli::CliChannel;
 use crate::channel::feishu::FeishuChannel;
 use crate::channel::http::HttpChannel;
 use crate::gateway::Gateway;
-use crate::heartbeat::Heartbeat;
+use crate::heartbeat::build_heartbeat_task;
 use crate::llm::create_llm_client;
 use crate::memory::MemoryStore;
 use crate::paths::{anqclaw_home, ensure_dirs, find_config, resolve_path};
@@ -221,22 +222,7 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
         )
     })?;
     let mut config = config::AppConfig::load(config_str)?;
-
-    // Resolve relative paths against anqclaw home
-    config.app.workspace = resolve_path(&home, &config.app.workspace)
-        .to_string_lossy()
-        .into_owned();
-    config.memory.db_path = resolve_path(&home, &config.memory.db_path)
-        .to_string_lossy()
-        .into_owned();
-    config.tools.file_access_dir = resolve_path(&home, &config.tools.file_access_dir)
-        .to_string_lossy()
-        .into_owned();
-    if !config.app.log_file.is_empty() {
-        config.app.log_file = resolve_path(&home, &config.app.log_file)
-            .to_string_lossy()
-            .into_owned();
-    }
+    config.resolve_paths_against(&home);
 
     let config = Arc::new(config);
 
@@ -490,33 +476,25 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
         }
     });
 
-    // Spawn Heartbeat (if enabled)
-    let heartbeat_handle = if bs.config.heartbeat.enabled {
-        let hb = Heartbeat::new(
-            &bs.config.heartbeat,
-            bs.agent.clone(),
-            bs.memory.clone(),
-            channels.clone(),
-            &bs.config.app.workspace,
-        );
-        tracing::info!(
-            interval_mins = bs.config.heartbeat.interval_minutes,
-            "heartbeat enabled / 心跳已启用"
-        );
-        Some(tokio::spawn(async move {
-            if let Err(e) = hb.run().await {
-                tracing::error!(error = %e, "heartbeat exited with error / 心跳退出并出错");
-            }
-        }))
+    let heartbeat_task = build_heartbeat_task(&bs.config.heartbeat, &bs.config.app.workspace);
+    let scheduler_tasks = if bs.config.scheduler.enabled {
+        bs.config.scheduler.tasks.clone()
     } else {
-        tracing::info!("heartbeat disabled / 心跳已禁用");
-        None
+        vec![]
     };
+    let scheduler_handle = if !scheduler_tasks.is_empty() || heartbeat_task.is_some() {
+        if heartbeat_task.is_some() {
+            tracing::info!(
+                interval_mins = bs.config.heartbeat.interval_minutes,
+                "heartbeat scheduled via scheduler / 心跳已通过调度器启用"
+            );
+        } else {
+            tracing::info!("heartbeat disabled / 心跳已禁用");
+        }
 
-    // Spawn Scheduler (if enabled)
-    let scheduler_handle = if bs.config.scheduler.enabled {
         let sched = Scheduler::new(
-            &bs.config.scheduler.tasks,
+            &scheduler_tasks,
+            heartbeat_task,
             bs.agent.clone(),
             bs.memory.clone(),
             channels.clone(),
@@ -532,7 +510,7 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
             }
         }))
     } else {
-        tracing::info!("scheduler disabled / 调度器已禁用");
+        tracing::info!("scheduler and heartbeat disabled / 调度器与心跳均已禁用");
         None
     };
 
@@ -545,9 +523,6 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
     tracing::info!("shutdown signal received, stopping / 收到关闭信号，正在停止...");
 
     gateway_handle.abort();
-    if let Some(hb) = heartbeat_handle {
-        hb.abort();
-    }
     if let Some(sh) = scheduler_handle {
         sh.abort();
     }

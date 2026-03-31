@@ -69,9 +69,13 @@ impl MemoryStore {
         if db_path != ":memory:"
             && let Some(parent) = std::path::Path::new(db_path).parent()
         {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("create db directory: {} / 创建数据库目录: {}", parent.display(), parent.display()))?;
+            tokio::fs::create_dir_all(parent).await.with_context(|| {
+                format!(
+                    "create db directory: {} / 创建数据库目录: {}",
+                    parent.display(),
+                    parent.display()
+                )
+            })?;
         }
 
         let opts = SqliteConnectOptions::from_str(db_path)
@@ -111,14 +115,18 @@ impl MemoryStore {
         .bind(table_name)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| format!("check table exists: {table_name} / 检查表是否存在: {table_name}"))?;
+        .with_context(|| {
+            format!("check table exists: {table_name} / 检查表是否存在: {table_name}")
+        })?;
         Ok(row.is_some())
     }
 
     async fn count_rows(&self, table_name: &str) -> Result<i64> {
         const ALLOWED: &[&str] = &["messages", "memories", "memories_data", "memories_fts"];
         if !ALLOWED.contains(&table_name) {
-            anyhow::bail!("count_rows: invalid table name '{table_name}' / count_rows: 无效表名 '{table_name}'");
+            anyhow::bail!(
+                "count_rows: invalid table name '{table_name}' / count_rows: 无效表名 '{table_name}'"
+            );
         }
         let sql = format!("SELECT COUNT(*) AS count FROM {table_name}");
         let row = sqlx::query(&sql)
@@ -196,14 +204,19 @@ impl MemoryStore {
     /// `tool_calls` is JSON-serialised; all other fields map 1-to-1.
     pub async fn save_conversation(&self, chat_id: &str, messages: &[ChatMessage]) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
-        let mut tx = self.pool.begin().await.context("begin transaction / 开始事务")?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin transaction / 开始事务")?;
 
         for msg in messages {
             let role = role_to_str(&msg.role);
             let tool_calls_json = match &msg.tool_calls {
-                Some(calls) if !calls.is_empty() => {
-                    Some(serde_json::to_string(calls).context("serialise tool_calls / 序列化 tool_calls")?)
-                }
+                Some(calls) if !calls.is_empty() => Some(
+                    serde_json::to_string(calls)
+                        .context("serialise tool_calls / 序列化 tool_calls")?,
+                ),
                 _ => None,
             };
 
@@ -264,6 +277,7 @@ impl MemoryStore {
                     tool_calls,
                     tool_call_id,
                     images: None,
+                    estimated_tokens: None,
                 }
             })
             .collect();
@@ -432,7 +446,11 @@ impl MemoryStore {
     /// Imports a `SessionExport` into the database.
     /// Uses the chat_id from the export payload.
     pub async fn import_session(&self, export: &SessionExport) -> Result<()> {
-        let mut tx = self.pool.begin().await.context("begin transaction / 开始事务")?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin transaction / 开始事务")?;
 
         for msg in &export.messages {
             let tool_calls_str = msg.tool_calls.as_ref().map(|v| v.to_string());
@@ -481,7 +499,10 @@ fn str_to_role(s: &str) -> Role {
         "assistant" => Role::Assistant,
         "tool" => Role::Tool,
         other => {
-            tracing::warn!(role = other, "unknown role in DB, defaulting to User / 数据库中未知角色，默认为 User");
+            tracing::warn!(
+                role = other,
+                "unknown role in DB, defaulting to User / 数据库中未知角色，默认为 User"
+            );
             Role::User
         }
     }
@@ -560,6 +581,7 @@ mod tests {
                 call_id: "call_abc".to_string(),
                 output: "Mon Mar 24 12:00:00 UTC 2026".to_string(),
                 is_error: false,
+                duration_ms: 12,
             }),
             ChatMessage::assistant("现在是 2026 年 3 月 24 日 12:00。"),
         ];

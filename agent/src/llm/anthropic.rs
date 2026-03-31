@@ -22,6 +22,7 @@ use super::LlmClient;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const EMPTY_USER_INPUT_PLACEHOLDER: &str = "(no user input)";
 
 // ─── Client ──────────────────────────────────────────────────────────────────
 
@@ -49,31 +50,35 @@ impl AnthropicClient {
         })
     }
 
-    async fn do_chat(
-        &self,
-        messages: &[ChatMessage],
-        tools: &[ToolDefinition],
-    ) -> Result<LlmResponse> {
-        // 1. Extract system prompt (all System messages joined)
+    fn build_request_body<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        tools: &'a [ToolDefinition],
+        stream: bool,
+    ) -> AntRequest<'a> {
         let system_text: String = messages
             .iter()
-            .filter(|m| m.role == Role::System)
-            .map(|m| m.content.as_str())
+            .filter(|message| message.role == Role::System)
+            .map(|message| message.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        // 2. Convert non-system messages to Anthropic format
-        let ant_messages: Vec<AntMessage<'_>> = messages
+        let mut ant_messages: Vec<AntMessage<'a>> = messages
             .iter()
-            .filter(|m| m.role != Role::System)
-            .map(|msg| to_ant_message(msg))
+            .filter(|message| message.role != Role::System)
+            .map(to_ant_message)
             .collect();
 
-        // 3. Convert tool definitions
-        let ant_tools: Vec<AntTool<'_>> = tools.iter().map(|tool| to_ant_tool(tool)).collect();
+        if ant_messages.is_empty() {
+            ant_messages.push(AntMessage {
+                role: "user",
+                content: AntContent::Text(Cow::Borrowed(EMPTY_USER_INPUT_PLACEHOLDER)),
+            });
+        }
 
-        // 4. Build request body
-        let mut body = AntRequest {
+        let ant_tools: Vec<AntTool<'a>> = tools.iter().map(to_ant_tool).collect();
+
+        AntRequest {
             model: self.model.as_str(),
             max_tokens: self.max_tokens,
             temperature: Some(self.temperature),
@@ -88,24 +93,27 @@ impl AnthropicClient {
             } else {
                 Some(ant_tools)
             },
-            stream: None,
-        };
-
-        // Anthropic requires `messages` to be non-empty and start with a user message.
-        // If the history is empty (e.g. heartbeat), inject a placeholder.
-        if body.messages.is_empty() {
-            body.messages.push(AntMessage {
-                role: "user",
-                content: AntContent::Text(Cow::Borrowed("(no user input)")),
-            });
+            stream: if stream { Some(true) } else { None },
         }
+    }
+
+    async fn do_chat(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
+        let body = self.build_request_body(messages, tools, false);
 
         // 5. HTTP with retry (429, 500, 529)
         let mut last_err = None;
         for attempt in 0..3u32 {
             if attempt > 0 {
                 let backoff = Duration::from_millis(1000 * 2u64.pow(attempt - 1));
-                tracing::warn!(attempt, ?backoff, "retrying Anthropic request / 正在重试 Anthropic 请求");
+                tracing::warn!(
+                    attempt,
+                    ?backoff,
+                    "retrying Anthropic request / 正在重试 Anthropic 请求"
+                );
                 tokio::time::sleep(backoff).await;
             }
 
@@ -121,8 +129,10 @@ impl AnthropicClient {
 
             match resp {
                 Ok(r) if r.status().is_success() => {
-                    let ant_resp: AntResponse =
-                        r.json().await.context("deserialise Anthropic response / 反序列化 Anthropic 响应失败")?;
+                    let ant_resp: AntResponse = r
+                        .json()
+                        .await
+                        .context("deserialise Anthropic response / 反序列化 Anthropic 响应失败")?;
                     return parse_ant_response(ant_resp);
                 }
                 Ok(r)
@@ -138,7 +148,9 @@ impl AnthropicClient {
                 Ok(r) => {
                     let status = r.status();
                     let text = r.text().await.unwrap_or_default();
-                    anyhow::bail!("Anthropic non-retryable error HTTP {status}: {text} / Anthropic 不可重试错误 HTTP {status}: {text}");
+                    anyhow::bail!(
+                        "Anthropic non-retryable error HTTP {status}: {text} / Anthropic 不可重试错误 HTTP {status}: {text}"
+                    );
                 }
                 Err(e) => {
                     last_err = Some(e.into());
@@ -146,7 +158,11 @@ impl AnthropicClient {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Anthropic request failed after retries / Anthropic 请求在重试后仍然失败")))
+        Err(last_err.unwrap_or_else(|| {
+            anyhow::anyhow!(
+                "Anthropic request failed after retries / Anthropic 请求在重试后仍然失败"
+            )
+        }))
     }
 
     /// Streaming version — sends SSE request, returns a channel of StreamEvents.
@@ -155,45 +171,7 @@ impl AnthropicClient {
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
     ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
-        let system_text: String = messages
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        let ant_messages: Vec<AntMessage<'_>> = messages
-            .iter()
-            .filter(|m| m.role != Role::System)
-            .map(|msg| to_ant_message(msg))
-            .collect();
-
-        let ant_tools: Vec<AntTool<'_>> = tools.iter().map(|tool| to_ant_tool(tool)).collect();
-
-        let mut body = AntRequest {
-            model: self.model.as_str(),
-            max_tokens: self.max_tokens,
-            temperature: Some(self.temperature),
-            system: if system_text.is_empty() {
-                None
-            } else {
-                Some(system_text)
-            },
-            messages: ant_messages,
-            tools: if ant_tools.is_empty() {
-                None
-            } else {
-                Some(ant_tools)
-            },
-            stream: Some(true),
-        };
-
-        if body.messages.is_empty() {
-            body.messages.push(AntMessage {
-                role: "user",
-                content: AntContent::Text(Cow::Borrowed("(no user input)")),
-            });
-        }
+        let body = self.build_request_body(messages, tools, true);
 
         let resp = self
             .http
@@ -208,7 +186,9 @@ impl AnthropicClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Anthropic streaming error HTTP {status}: {text} / Anthropic 流式错误 HTTP {status}: {text}");
+            anyhow::bail!(
+                "Anthropic streaming error HTTP {status}: {text} / Anthropic 流式错误 HTTP {status}: {text}"
+            );
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -227,7 +207,9 @@ impl AnthropicClient {
                     Ok(Some(chunk)) => {
                         buffer.extend_from_slice(&chunk);
                         if buffer.len() > MAX_BUFFER_SIZE {
-                            tracing::warn!("Anthropic SSE buffer exceeded limit, truncating / Anthropic SSE 缓冲区超出限制，正在截断");
+                            tracing::warn!(
+                                "Anthropic SSE buffer exceeded limit, truncating / Anthropic SSE 缓冲区超出限制，正在截断"
+                            );
                             break;
                         }
                     }
@@ -367,7 +349,10 @@ fn drain_complete_sse_lines(buffer: &mut Vec<u8>) -> Vec<String> {
 
         match std::str::from_utf8(line_bytes) {
             Ok(line) => lines.push(line.to_owned()),
-            Err(err) => tracing::warn!(?err, "dropping invalid UTF-8 Anthropic SSE line / 丢弃无效 UTF-8 的 Anthropic SSE 行"),
+            Err(err) => tracing::warn!(
+                ?err,
+                "dropping invalid UTF-8 Anthropic SSE line / 丢弃无效 UTF-8 的 Anthropic SSE 行"
+            ),
         }
 
         cursor = pos + 1;
@@ -596,7 +581,67 @@ fn parse_ant_response(resp: AntResponse) -> Result<LlmResponse> {
 
 #[cfg(test)]
 mod tests {
-    use super::drain_complete_sse_lines;
+    use super::{AnthropicClient, EMPTY_USER_INPUT_PLACEHOLDER, drain_complete_sse_lines};
+    use crate::types::ChatMessage;
+    use secrecy::SecretString;
+
+    fn test_client() -> AnthropicClient {
+        AnthropicClient {
+            http: reqwest::Client::new(),
+            api_key: SecretString::new("test-key".to_owned().into()),
+            model: "claude-test".to_string(),
+            max_tokens: 1024,
+            temperature: 0.3,
+        }
+    }
+
+    #[test]
+    fn build_request_body_injects_placeholder_user_message_for_empty_history() {
+        let client = test_client();
+        let body = client.build_request_body(&[], &[], false);
+
+        assert!(body.system.is_none());
+        assert!(body.tools.is_none());
+        assert!(body.stream.is_none());
+        assert_eq!(body.messages.len(), 1);
+
+        match &body.messages[0].content {
+            super::AntContent::Text(text) => {
+                assert_eq!(text.as_ref(), EMPTY_USER_INPUT_PLACEHOLDER)
+            }
+            super::AntContent::Blocks(_) => {
+                panic!("expected placeholder text message / 预期占位符文本消息")
+            }
+        }
+    }
+
+    #[test]
+    fn build_request_body_moves_system_messages_to_top_level_field() {
+        let client = test_client();
+        let messages = vec![
+            ChatMessage::system("system one"),
+            ChatMessage::system("system two"),
+            ChatMessage::user("hello"),
+        ];
+        let body = client.build_request_body(&messages, &[], true);
+
+        let system = body
+            .system
+            .as_deref()
+            .expect("expected top-level system text / 预期顶层 system 文本");
+
+        assert!(system.contains("system one"));
+        assert!(system.contains("system two"));
+        assert_eq!(body.messages.len(), 1);
+        assert_eq!(body.stream, Some(true));
+
+        match &body.messages[0].content {
+            super::AntContent::Text(text) => assert_eq!(text.as_ref(), "hello"),
+            super::AntContent::Blocks(_) => {
+                panic!("expected user text message / 预期用户文本消息")
+            }
+        }
+    }
 
     #[test]
     fn drain_complete_sse_lines_handles_split_utf8_across_chunks() {

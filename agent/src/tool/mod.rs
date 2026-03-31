@@ -14,6 +14,7 @@ pub mod pdf_read;
 pub mod shell;
 pub mod skill_tool;
 pub mod web;
+mod tokenize;
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -241,23 +242,27 @@ impl ToolRegistry {
                 let name = call.name.clone();
 
                 async move {
+                    let started_at = std::time::Instant::now();
                     match tool {
                         Some(t) => match t.execute(args).await {
                             Ok(output) => ToolResult {
                                 call_id,
                                 output,
                                 is_error: false,
+                                duration_ms: started_at.elapsed().as_millis() as u64,
                             },
                             Err(e) => ToolResult {
                                 call_id,
                                 output: format!("Tool `{name}` failed: {e}"),
                                 is_error: true,
+                                duration_ms: started_at.elapsed().as_millis() as u64,
                             },
                         },
                         None => ToolResult {
                             call_id,
                             output: format!("Unknown tool: `{name}`"),
                             is_error: true,
+                            duration_ms: started_at.elapsed().as_millis() as u64,
                         },
                     }
                 }

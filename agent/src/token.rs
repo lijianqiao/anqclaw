@@ -46,65 +46,6 @@ pub fn estimate_message_tokens(role: &str, content: &str) -> usize {
     4 + estimate_tokens(role) + estimate_tokens(content)
 }
 
-/// Trim history messages to fit within a token budget.
-///
-/// Keeps the system prompt(s) and the most recent messages.
-/// Returns the index into `messages` from which to start including.
-///
-/// `messages` layout: [system, ...system_extras, ...history, user_msg]
-/// We always keep system messages (at the start) and the last user message.
-/// History is trimmed from the oldest.
-#[allow(dead_code)]
-pub fn trim_history_to_budget(
-    messages: &[(String, String)], // (role, content) pairs
-    max_tokens: u64,
-) -> usize {
-    if max_tokens == 0 {
-        return 0; // no limit
-    }
-
-    // Calculate total tokens
-    let token_counts: Vec<usize> = messages
-        .iter()
-        .map(|(role, content)| estimate_message_tokens(role, content))
-        .collect();
-
-    let total: usize = token_counts.iter().sum();
-    if total as u64 <= max_tokens {
-        return 0; // everything fits
-    }
-
-    // Find where system messages end
-    let system_end = messages
-        .iter()
-        .position(|(role, _)| role != "system")
-        .unwrap_or(messages.len());
-
-    // System tokens (always kept)
-    let system_tokens: usize = token_counts[..system_end].iter().sum();
-    // Last message tokens (always kept — it's the current user message)
-    let last_tokens = *token_counts.last().unwrap_or(&0);
-
-    let budget_for_history = max_tokens.saturating_sub(system_tokens as u64 + last_tokens as u64);
-
-    // Scan history from newest to oldest, accumulating until budget exhausted
-    let history_range = system_end..messages.len().saturating_sub(1);
-    let mut accumulated = 0u64;
-    let mut keep_from = history_range.start;
-
-    for i in history_range.clone().rev() {
-        let msg_tokens = token_counts[i] as u64;
-        if accumulated + msg_tokens > budget_for_history {
-            keep_from = i + 1;
-            break;
-        }
-        accumulated += msg_tokens;
-        keep_from = i;
-    }
-
-    keep_from
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,28 +66,4 @@ mod tests {
         assert!(tokens > 8 && tokens < 20, "got {tokens}");
     }
 
-    #[test]
-    fn test_trim_all_fits() {
-        let messages = vec![
-            ("system".into(), "You are helpful.".into()),
-            ("user".into(), "Hi".into()),
-        ];
-        assert_eq!(trim_history_to_budget(&messages, 1000), 0);
-    }
-
-    #[test]
-    fn test_trim_exceeds_budget() {
-        let long_msg = "a".repeat(4000); // ~1000 tokens
-        let messages = vec![
-            ("system".into(), "prompt".into()),
-            ("user".into(), long_msg.clone()),
-            ("assistant".into(), long_msg.clone()),
-            ("user".into(), long_msg.clone()),
-            ("assistant".into(), long_msg.clone()),
-            ("user".into(), "current question".into()),
-        ];
-        // Budget of 2500 tokens — should drop some history
-        let start = trim_history_to_budget(&messages, 2500);
-        assert!(start > 1, "expected trimming, got start={start}");
-    }
 }
