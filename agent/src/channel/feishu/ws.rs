@@ -48,7 +48,7 @@ pub async fn run_with_reconnect(
     loop {
         match listen_ws(api, &tx, allow_from, &mut seen_ids).await {
             Ok(()) => {
-                tracing::info!("Feishu WS: connection closed, reconnecting");
+                tracing::info!("Feishu WS: connection closed, reconnecting / Feishu WS: 连接已关闭，正在重连");
                 attempt = 0;
             }
             Err(e) => {
@@ -58,7 +58,7 @@ pub async fn run_with_reconnect(
                     error = %e,
                     attempt,
                     delay_secs = delay.as_secs(),
-                    "Feishu WS: error, reconnecting after backoff"
+                    "Feishu WS: error, reconnecting after backoff / Feishu WS: 发生错误，退避后重连"
                 );
                 tokio::time::sleep(delay).await;
             }
@@ -84,10 +84,10 @@ async fn listen_ws(
     // Extract service_id from URL query params
     let service_id = extract_service_id(&wss_url);
 
-    tracing::info!("Feishu WS: connecting to {wss_url}");
+    tracing::info!("Feishu WS: connecting to {wss_url} / Feishu WS: 正在连接 {wss_url}");
     let (ws_stream, _) = tokio_tungstenite::connect_async(&wss_url).await?;
     let (mut write, mut read) = ws_stream.split();
-    tracing::info!("Feishu WS: connected (service_id={service_id})");
+    tracing::info!("Feishu WS: connected (service_id={service_id}) / Feishu WS: 连接成功 (service_id={service_id})");
 
     // Ping interval from server config (default 120s, min 10s)
     let mut ping_secs = client_config.ping_interval.unwrap_or(120).max(10);
@@ -117,7 +117,7 @@ async fn listen_ws(
                 seq = seq.wrapping_add(1);
                 let ping = make_ping_frame(seq, service_id);
                 if write.send(WsMsg::Binary(ping.encode_to_vec().into())).await.is_err() {
-                    tracing::warn!("Feishu WS: ping failed, reconnecting");
+                    tracing::warn!("Feishu WS: ping failed, reconnecting / Feishu WS: ping 失败，正在重连");
                     break;
                 }
                 // GC stale fragments > 5 min
@@ -126,14 +126,14 @@ async fn listen_ws(
                 // Hard cap to prevent unbounded growth from malformed streams
                 if frag_cache.len() > 100 {
                     frag_cache.clear();
-                    tracing::warn!("Feishu WS: frag_cache exceeded 100 entries, cleared");
+                    tracing::warn!("Feishu WS: frag_cache exceeded 100 entries, cleared / Feishu WS: 分片缓存超过 100 条，已清空");
                 }
             }
 
             // Heartbeat timeout check
             _ = timeout_check.tick() => {
                 if last_recv.elapsed() > WS_HEARTBEAT_TIMEOUT {
-                    tracing::warn!("Feishu WS: heartbeat timeout, reconnecting");
+                    tracing::warn!("Feishu WS: heartbeat timeout, reconnecting / Feishu WS: 心跳超时，正在重连");
                     break;
                 }
             }
@@ -152,18 +152,18 @@ async fn listen_ws(
                                 continue;
                             }
                             WsMsg::Close(_) => {
-                                tracing::info!("Feishu WS: server closed connection");
+                                tracing::info!("Feishu WS: server closed connection / Feishu WS: 服务端关闭了连接");
                                 break;
                             }
                             _ => continue,
                         }
                     }
                     None => {
-                        tracing::info!("Feishu WS: stream ended");
+                        tracing::info!("Feishu WS: stream ended / Feishu WS: 数据流已结束");
                         break;
                     }
                     Some(Err(e)) => {
-                        tracing::error!(error = %e, "Feishu WS: read error");
+                        tracing::error!(error = %e, "Feishu WS: read error / Feishu WS: 读取错误");
                         break;
                     }
                 };
@@ -172,7 +172,7 @@ async fn listen_ws(
                 let frame = match PbFrame::decode(&raw[..]) {
                     Ok(f) => f,
                     Err(e) => {
-                        tracing::error!(error = %e, "Feishu WS: protobuf decode failed");
+                        tracing::error!(error = %e, "Feishu WS: protobuf decode failed / Feishu WS: Protobuf 解码失败");
                         continue;
                     }
                 };
@@ -226,7 +226,7 @@ async fn listen_ws(
                 let event: LarkEvent = match serde_json::from_slice(&payload) {
                     Ok(e) => e,
                     Err(e) => {
-                        tracing::error!(error = %e, "Feishu WS: event JSON parse failed");
+                        tracing::error!(error = %e, "Feishu WS: event JSON parse failed / Feishu WS: 事件 JSON 解析失败");
                         continue;
                     }
                 };
@@ -238,7 +238,7 @@ async fn listen_ws(
                 let recv: MsgReceivePayload = match serde_json::from_value(event.event) {
                     Ok(r) => r,
                     Err(e) => {
-                        tracing::error!(error = %e, "Feishu WS: message payload parse failed");
+                        tracing::error!(error = %e, "Feishu WS: message payload parse failed / Feishu WS: 消息载荷解析失败");
                         continue;
                     }
                 };
@@ -251,7 +251,7 @@ async fn listen_ws(
                 // Allowlist check
                 let sender_id = recv.sender.sender_id.open_id.as_deref().unwrap_or("");
                 if !is_user_allowed(allow_from, sender_id) {
-                    tracing::warn!(sender = sender_id, "Feishu WS: ignoring (not in allow_from)");
+                    tracing::warn!(sender = sender_id, "Feishu WS: ignoring (not in allow_from) / Feishu WS: 忽略消息（发送者不在白名单中）");
                     continue;
                 }
 
@@ -269,7 +269,7 @@ async fn listen_ws(
                         seen_ids.extend(entries);
                     }
                     if seen_ids.contains_key(&lark_msg_id) {
-                        tracing::debug!(msg_id = %lark_msg_id, "Feishu WS: duplicate, skipping");
+                        tracing::debug!(msg_id = %lark_msg_id, "Feishu WS: duplicate, skipping / Feishu WS: 重复消息，跳过");
                         continue;
                     }
                     seen_ids.insert(lark_msg_id.clone(), now);
@@ -280,7 +280,7 @@ async fn listen_ws(
                     msg_id = %lark_msg_id,
                     msg_type = %recv.message.message_type,
                     content = %recv.message.content,
-                    "Feishu WS: raw incoming message"
+                    "Feishu WS: raw incoming message / Feishu WS: 原始收到消息"
                 );
 
                 // Convert to InboundMessage
@@ -290,7 +290,7 @@ async fn listen_ws(
                         tracing::warn!(
                             msg_id = %lark_msg_id,
                             reason = %reason,
-                            "Feishu WS: message dropped during conversion"
+                            "Feishu WS: message dropped during conversion / Feishu WS: 消息在转换过程中被丢弃"
                         );
                         continue;
                     }
@@ -299,11 +299,11 @@ async fn listen_ws(
                 tracing::debug!(
                     chat_id = %inbound.chat_id,
                     msg_id = %lark_msg_id,
-                    "Feishu WS: received message"
+                    "Feishu WS: received message / Feishu WS: 收到消息"
                 );
 
                 if tx.send(inbound).await.is_err() {
-                    tracing::error!("Feishu WS: tx channel closed");
+                    tracing::error!("Feishu WS: tx channel closed / Feishu WS: 发送通道已关闭");
                     break;
                 }
             }
@@ -357,7 +357,7 @@ fn handle_control_frame(
         if secs != *ping_secs {
             *ping_secs = secs;
             *hb_interval = tokio::time::interval(Duration::from_secs(secs));
-            tracing::info!(ping_interval = secs, "Feishu WS: ping_interval updated");
+            tracing::info!(ping_interval = secs, "Feishu WS: ping_interval updated / Feishu WS: ping 间隔已更新");
         }
     }
 }

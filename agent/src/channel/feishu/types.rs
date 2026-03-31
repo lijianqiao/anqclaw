@@ -204,7 +204,7 @@ impl MsgReceivePayload {
                     }
                     tracing::warn!(
                         raw_content = %truncate_str(&lark_msg.content, 200),
-                        "Feishu: post text extraction empty, using fallback"
+                        "Feishu: post text extraction empty, using fallback / Feishu: post 文本提取为空，使用后备方案"
                     );
                     MessageContent::Text(fallback)
                 } else {
@@ -225,7 +225,7 @@ impl MsgReceivePayload {
                 }
                 tracing::info!(
                     msg_type,
-                    "Feishu: extracted text from unsupported message type"
+                    "Feishu: extracted text from unsupported message type / Feishu: 从不支持的消息类型中提取了文本"
                 );
                 MessageContent::Text(fallback)
             }

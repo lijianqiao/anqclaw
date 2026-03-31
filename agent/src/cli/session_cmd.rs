@@ -11,7 +11,7 @@ pub async fn run_list(memory: &MemoryStore) -> Result<()> {
     let sessions = memory.list_sessions().await?;
 
     if sessions.is_empty() {
-        println!("No sessions found.");
+        println!("No sessions found. / 未找到任何会话。");
         return Ok(());
     }
 
@@ -25,7 +25,7 @@ pub async fn run_list(memory: &MemoryStore) -> Result<()> {
         println!("{:<40} {:>6} {:>20}", s.chat_id, s.message_count, dt);
     }
 
-    println!("\nTotal: {} session(s)", sessions.len());
+    println!("\nTotal: {} session(s) / 共 {} 个会话", sessions.len(), sessions.len());
     Ok(())
 }
 
@@ -41,7 +41,7 @@ pub async fn run_clean(memory: &MemoryStore, before: &str) -> Result<()> {
         .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
         .unwrap_or_else(|| cutoff.to_string());
 
-    println!("Deleted {deleted} message(s) from sessions last active before {dt}.");
+    println!("Deleted {deleted} message(s) from sessions last active before {dt}. / 已删除 {dt} 之前最后活跃的会话共 {deleted} 条消息。");
     Ok(())
 }
 
@@ -50,9 +50,9 @@ pub async fn run_delete(memory: &MemoryStore, chat_id: &str) -> Result<()> {
     let deleted = memory.delete_session(chat_id).await?;
 
     if deleted == 0 {
-        println!("No messages found for session '{chat_id}'.");
+        println!("No messages found for session '{chat_id}'. / 会话 '{chat_id}' 未找到任何消息。");
     } else {
-        println!("Deleted {deleted} message(s) from session '{chat_id}'.");
+        println!("Deleted {deleted} message(s) from session '{chat_id}'. / 已从会话 '{chat_id}' 删除 {deleted} 条消息。");
     }
     Ok(())
 }
@@ -71,14 +71,14 @@ pub async fn run_export(memory: &MemoryStore, chat_id: &str, output: Option<&str
         tokio::fs::write(path, &json)
             .await
             .with_context(|| format!("write to {path} / 写入 {path} 失败"))?;
-        println!("Exported {} message(s) → {path}", export.messages.len());
+        println!("Exported {} message(s) → {path} / 已导出 {} 条消息至 {path}", export.messages.len(), export.messages.len());
     } else {
         // Default filename: <chat_id>.json
         let filename = format!("{chat_id}.json");
         tokio::fs::write(&filename, &json)
             .await
             .with_context(|| format!("write to {filename} / 写入 {filename} 失败"))?;
-        println!("Exported {} message(s) → {filename}", export.messages.len());
+        println!("Exported {} message(s) → {filename} / 已导出 {} 条消息至 {filename}", export.messages.len(), export.messages.len());
     }
 
     Ok(())
@@ -101,7 +101,7 @@ pub async fn run_import(memory: &MemoryStore, file: &str) -> Result<()> {
 
     memory.import_session(&export).await?;
 
-    println!("Imported {count} message(s) into session '{chat_id}'.");
+    println!("Imported {count} message(s) into session '{chat_id}'. / 已将 {count} 条消息导入会话 '{chat_id}'。");
     Ok(())
 }
 
