@@ -8,6 +8,8 @@ pub mod probe;
 pub mod prompt;
 pub mod redact;
 
+use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -39,12 +41,78 @@ pub struct AgentCore {
     env_probe: EnvironmentProbe,
 }
 
+#[derive(Default)]
+struct SkillCandidateContext {
+    user_text: String,
+    history_text: String,
+    combined_text: String,
+    recent_file_tokens: HashSet<String>,
+    workspace_extensions: HashSet<String>,
+}
+
+#[derive(Clone)]
+struct SkillCandidateMatch {
+    skill: SkillMeta,
+    score: i32,
+    description_match: bool,
+    extension_match: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct MatchSignalScore {
+    score: i32,
+    matched: bool,
+}
+
+const DESCRIPTION_STOPWORDS: &[&str] = &[
+    "the",
+    "and",
+    "when",
+    "with",
+    "this",
+    "that",
+    "from",
+    "into",
+    "your",
+    "their",
+    "then",
+    "than",
+    "use",
+    "using",
+    "used",
+    "skill",
+    "time",
+    "any",
+    "want",
+    "wants",
+    "user",
+    "users",
+    "file",
+    "files",
+    "primary",
+    "input",
+    "output",
+    "trigger",
+    "especially",
+    "existing",
+    "these",
+    "those",
+];
+
 impl AgentCore {
-    fn auto_activate_skills(
+    #[cfg(test)]
+    fn select_skill_candidates(&self, user_text: &str, history: &[ChatMessage]) -> Vec<SkillMeta> {
+        self.select_skill_candidate_matches(user_text, history)
+            .into_iter()
+            .map(|candidate| candidate.skill)
+            .collect()
+    }
+
+    fn select_skill_candidate_matches(
         &self,
         user_text: &str,
         history: &[ChatMessage],
-    ) -> Vec<(String, String)> {
+    ) -> Vec<SkillCandidateMatch> {
         let Some(registry) = self.skill_registry.as_ref() else {
             return Vec::new();
         };
@@ -54,49 +122,185 @@ impl AgentCore {
             return Vec::new();
         }
 
-        let mut context_parts = vec![user_text.to_ascii_lowercase()];
-        context_parts.extend(
-            history
-                .iter()
-                .rev()
-                .filter(|message| message.role != crate::types::Role::System)
-                .take(8)
-                .map(|message| message.content.to_ascii_lowercase()),
-        );
-        let context = context_parts.join("\n");
-
-        registry
+        let context = self.build_skill_candidate_context(user_text, history);
+        let mut scored: Vec<SkillCandidateMatch> = registry
             .list()
             .into_iter()
-            .filter(|skill| Self::skill_matches_context(skill, &context))
-            .take(max_active)
-            .filter_map(|skill| match registry.load_content(&skill.name) {
-                Ok(content) => Some((skill.name, content)),
-                Err(error) => {
-                    tracing::warn!(
-                        skill = %skill.name,
-                        error = %error,
-                        "failed to auto-activate skill / 自动激活技能失败"
-                    );
-                    None
-                }
-            })
-            .collect()
+            .filter_map(|skill| Self::score_skill_candidate(&skill, &context))
+            .collect();
+
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| right.skill.priority.cmp(&left.skill.priority))
+                .then_with(|| left.skill.name.cmp(&right.skill.name))
+        });
+
+        scored.into_iter().take(max_active).collect()
     }
 
-    fn skill_matches_context(skill: &SkillMeta, context: &str) -> bool {
-        let skill_name = skill.name.trim().to_ascii_lowercase();
-        if !skill_name.is_empty() && context.contains(&skill_name) {
-            return true;
+    fn build_skill_candidate_context(
+        &self,
+        user_text: &str,
+        history: &[ChatMessage],
+    ) -> SkillCandidateContext {
+        let user_text = user_text.to_lowercase();
+        let history_messages: Vec<String> = history
+            .iter()
+            .rev()
+            .filter(|message| message.role != crate::types::Role::System)
+            .take(8)
+            .map(|message| message.content.to_lowercase())
+            .collect();
+        let history_text = history_messages.join("\n");
+        let combined_text = if history_text.is_empty() {
+            user_text.clone()
+        } else {
+            format!("{user_text}\n{history_text}")
+        };
+
+        SkillCandidateContext {
+            recent_file_tokens: extract_file_like_tokens(&combined_text),
+            workspace_extensions: collect_workspace_extensions(
+                Path::new(&self.config.app.workspace),
+                256,
+            ),
+            user_text,
+            history_text,
+            combined_text,
+        }
+    }
+
+    fn score_skill_candidate(
+        skill: &SkillMeta,
+        context: &SkillCandidateContext,
+    ) -> Option<SkillCandidateMatch> {
+        if skill.disable_model_invocation {
+            return None;
         }
 
-        skill
-            .trigger
-            .split([',', '，', '、', ';', '；', '\n'])
-            .map(str::trim)
-            .filter(|term| !term.is_empty())
-            .map(str::to_ascii_lowercase)
-            .any(|term| context.contains(&term))
+        let mut score = skill.priority;
+        let mut matched = false;
+        let skill_name = skill.name.trim().to_lowercase();
+        let mut description_match = false;
+        let mut extension_match = false;
+
+        if !skill_name.is_empty() {
+            if context.user_text.contains(&skill_name) {
+                score += 120;
+                matched = true;
+            }
+            if context.history_text.contains(&skill_name) {
+                score += 60;
+                matched = true;
+            }
+        }
+
+        let description_signal = Self::score_description_match(skill, context);
+        if description_signal.matched {
+            score += description_signal.score;
+            matched = true;
+            description_match = true;
+        }
+
+        for keyword in skill.keyword_terms() {
+            if context.user_text.contains(&keyword) {
+                score += 80;
+                matched = true;
+            }
+            if context.history_text.contains(&keyword) {
+                score += 40;
+                matched = true;
+            }
+        }
+
+        for trigger in skill.trigger_terms() {
+            if context.user_text.contains(&trigger) {
+                score += 40;
+                matched = true;
+            }
+            if context.history_text.contains(&trigger) {
+                score += 20;
+                matched = true;
+            }
+        }
+
+        let extension_signal = Self::score_extension_match(skill, context);
+        if extension_signal.matched {
+            score += extension_signal.score;
+            matched = true;
+            extension_match = true;
+        }
+
+        matched.then_some(SkillCandidateMatch {
+            skill: skill.clone(),
+            score,
+            description_match,
+            extension_match,
+        })
+    }
+
+    fn score_description_match(
+        skill: &SkillMeta,
+        context: &SkillCandidateContext,
+    ) -> MatchSignalScore {
+        let description = skill.description.trim().to_lowercase();
+        if description.is_empty() {
+            return MatchSignalScore::default();
+        }
+
+        let mut score = 0;
+        if context.user_text.contains(&description) {
+            score += 50;
+        } else {
+            let terms = extract_description_terms(&description);
+            if terms.iter().any(|term| context.user_text.contains(term)) {
+                score += 50;
+            }
+            if terms.iter().any(|term| context.history_text.contains(term)) {
+                score += 25;
+            }
+            return MatchSignalScore {
+                score,
+                matched: score > 0,
+            };
+        }
+
+        if context.history_text.contains(&description) {
+            score += 25;
+        }
+        MatchSignalScore {
+            score,
+            matched: score > 0,
+        }
+    }
+
+    fn score_extension_match(
+        skill: &SkillMeta,
+        context: &SkillCandidateContext,
+    ) -> MatchSignalScore {
+        let mut score = 0;
+
+        for extension in skill.extension_terms() {
+            if context.combined_text.contains(&extension)
+                || context
+                    .recent_file_tokens
+                    .iter()
+                    .any(|token| token.ends_with(&extension))
+            {
+                score += 90;
+            }
+
+            if context.workspace_extensions.contains(&extension) {
+                score += 15;
+            }
+        }
+
+        MatchSignalScore {
+            score,
+            matched: score > 0,
+        }
     }
 
     fn summarize_tool_failures(results: &[crate::types::ToolResult], max_items: usize) -> String {
@@ -215,18 +419,28 @@ impl AgentCore {
         history: &[ChatMessage],
         stream_tx: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<(OutboundMessage, Vec<ChatMessage>)> {
-        // 1. Build system prompt (with skill summaries if available)
+        // 1. Select candidate skills and build the system prompt summary.
+        let user_text = msg.content.to_text();
+        let candidate_matches = self.select_skill_candidate_matches(&user_text, history);
+        let candidate_skills: Vec<SkillMeta> = candidate_matches
+            .iter()
+            .map(|candidate| candidate.skill.clone())
+            .collect();
         let skill_summary = self
             .skill_registry
             .as_ref()
-            .map(|r| r.build_summary())
+            .map(|registry| {
+                registry.build_summary(
+                    &candidate_skills,
+                    self.config.skills.max_skills_in_prompt,
+                    self.config.skills.max_skill_prompt_chars,
+                )
+            })
             .unwrap_or_default();
         let system_prompt =
             build_system_prompt(&self.config, &skill_summary, &self.env_probe).await;
 
         // 2. Search relevant memories
-        let user_text = msg.content.to_text();
-        let activated_skills = self.auto_activate_skills(&user_text, history);
         let memories = self
             .memory
             .search_memory(&user_text, self.config.memory.search_limit as usize)
@@ -245,17 +459,35 @@ impl AgentCore {
             messages.push(ChatMessage::system(&mem_text));
         }
 
-        if !activated_skills.is_empty() {
+        if !candidate_matches.is_empty() {
             tracing::info!(
-                skills = ?activated_skills
+                skills = ?candidate_matches
                     .iter()
-                    .map(|(name, _)| name.as_str())
+                    .map(|candidate| candidate.skill.name.as_str())
                     .collect::<Vec<_>>(),
-                "auto-activated skills from request/history / 已根据请求和历史自动激活技能"
+                candidate_count = candidate_matches.len(),
+                description_matches = ?candidate_matches
+                    .iter()
+                    .filter(|candidate| candidate.description_match)
+                    .map(|candidate| candidate.skill.name.as_str())
+                    .collect::<Vec<_>>(),
+                extension_matches = ?candidate_matches
+                    .iter()
+                    .filter(|candidate| candidate.extension_match)
+                    .map(|candidate| candidate.skill.name.as_str())
+                    .collect::<Vec<_>>(),
+                "selected skill candidates from request/history / 已根据请求和历史筛选技能候选"
             );
-            for (skill_name, content) in &activated_skills {
-                let injected = format!("# Activated Skill: {skill_name}\n\n{content}");
-                messages.push(ChatMessage::system(&injected));
+        } else if let Some(registry) = self.skill_registry.as_ref() {
+            let skills_loaded_count = registry.list().len();
+            if skills_loaded_count > 0 {
+                tracing::debug!(
+                    skills_loaded_count,
+                    candidate_count = 0,
+                    description_matches = ?Vec::<String>::new(),
+                    extension_matches = ?Vec::<String>::new(),
+                    "skills loaded but no candidates matched this request / 技能已加载，但本次请求未命中任何候选"
+                );
             }
         }
 
@@ -659,6 +891,155 @@ impl AgentCore {
     }
 }
 
+fn extract_file_like_tokens(text: &str) -> HashSet<String> {
+    let mut current = String::new();
+    let mut tokens = HashSet::new();
+
+    for ch in text.chars() {
+        if ch.is_whitespace()
+            || matches!(
+                ch,
+                ',' | '，'
+                    | ';'
+                    | '；'
+                    | ':'
+                    | '：'
+                    | '"'
+                    | '\''
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '<'
+                    | '>'
+            )
+        {
+            push_file_token(&mut current, &mut tokens);
+            continue;
+        }
+        current.push(ch);
+    }
+    push_file_token(&mut current, &mut tokens);
+
+    tokens
+}
+
+fn push_file_token(current: &mut String, tokens: &mut HashSet<String>) {
+    if current.contains('.') {
+        let token = current
+            .trim_matches(|ch: char| matches!(ch, '.' | ',' | '，' | ';' | '；' | '"' | '\''))
+            .to_lowercase();
+        if !token.is_empty() && token.contains('.') {
+            tokens.insert(token);
+        }
+    }
+    current.clear();
+}
+
+fn collect_workspace_extensions(workspace: &Path, max_files: usize) -> HashSet<String> {
+    let mut extensions = HashSet::new();
+    if max_files == 0 || !workspace.exists() {
+        return extensions;
+    }
+
+    let mut visited_files = 0usize;
+    let mut stack = vec![workspace.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        if visited_files >= max_files {
+            break;
+        }
+
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            if visited_files >= max_files {
+                break;
+            }
+
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            visited_files += 1;
+            if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
+                let extension = extension.trim().to_lowercase();
+                if !extension.is_empty() {
+                    extensions.insert(format!(".{extension}"));
+                }
+            }
+        }
+    }
+
+    extensions
+}
+
+fn extract_description_terms(description: &str) -> HashSet<String> {
+    let mut terms = HashSet::new();
+    let mut current = String::new();
+
+    for ch in description.chars() {
+        if ch.is_alphanumeric() || ch == '.' {
+            current.push(ch);
+        } else {
+            push_description_term(&mut current, &mut terms);
+        }
+    }
+    push_description_term(&mut current, &mut terms);
+
+    terms
+}
+
+fn push_description_term(current: &mut String, terms: &mut HashSet<String>) {
+    if current.is_empty() {
+        return;
+    }
+
+    let term = current.trim().to_lowercase();
+    current.clear();
+
+    if term.is_empty() {
+        return;
+    }
+
+    if term.starts_with('.') {
+        if term.len() >= 4 {
+            terms.insert(term);
+        }
+        return;
+    }
+
+    if term.is_ascii() {
+        if term.len() >= 3 && !DESCRIPTION_STOPWORDS.contains(&term.as_str()) {
+            terms.insert(term);
+        }
+        return;
+    }
+
+    let char_count = term.chars().count();
+    if char_count >= 2 {
+        terms.insert(term.clone());
+    }
+
+    if char_count >= 4 {
+        let chars: Vec<char> = term.chars().collect();
+        for window_size in [3usize, 4usize] {
+            if char_count < window_size {
+                continue;
+            }
+            for window in chars.windows(window_size) {
+                terms.insert(window.iter().collect());
+            }
+        }
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -794,6 +1175,51 @@ max_tool_rounds = 3
             trace_id: String::new(),
             images: vec![],
         }
+    }
+
+    fn test_config_with_workspace(workspace: &std::path::Path) -> Arc<AppConfig> {
+        let workspace = workspace.to_string_lossy().replace('\\', "/");
+        let toml_str = format!(
+            r#"
+[app]
+name = "test"
+workspace = "{workspace}"
+log_level = "info"
+
+[feishu]
+app_id = "test"
+app_secret = "test"
+
+[llm]
+provider = "anthropic"
+model = "test"
+api_key = "test"
+
+[agent]
+max_tool_rounds = 3
+"#
+        );
+        Arc::new(AppConfig::load_from_str(&toml_str).unwrap())
+    }
+
+    fn create_skill_registry(
+        root: &std::path::Path,
+        skills: &[(&str, &str)],
+    ) -> Arc<SkillRegistry> {
+        let _ = std::fs::remove_dir_all(root);
+        for (name, content) in skills {
+            let skill_dir = root.join(name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+        }
+
+        Arc::new(SkillRegistry::scan(
+            vec![crate::skill::SkillSource::new(
+                "workspace",
+                root.to_path_buf(),
+            )],
+            256 * 1024,
+        ))
     }
 
     // ── Tests ────────────────────────────────────────────────────────────────
@@ -1071,17 +1497,19 @@ max_tool_rounds = 10
     #[tokio::test]
     async fn test_auto_activates_skill_from_recent_history() {
         let memory = test_memory().await;
-        let config = test_config();
+        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_candidate_workspace");
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let config = test_config_with_workspace(&workspace_dir);
 
         let skill_dir = std::env::temp_dir().join("anqclaw_test_auto_activate_xlsx_skill");
-        let _ = std::fs::remove_dir_all(&skill_dir);
-        std::fs::create_dir_all(skill_dir.join("xlsx")).unwrap();
-        std::fs::write(
-            skill_dir.join("xlsx").join("SKILL.md"),
-            "---\nname: xlsx\ndescription: Spreadsheet skill\n---\nUse pandas for spreadsheet inspection.",
-        )
-        .unwrap();
-        let skill_registry = Arc::new(SkillRegistry::scan(&skill_dir));
+        let skill_registry = create_skill_registry(
+            &skill_dir,
+            &[(
+                "xlsx",
+                "---\nname: xlsx\ndescription: Spreadsheet skill\nextensions:\n  - .xlsx\nkeywords:\n  - spreadsheet\n---\nUse pandas for spreadsheet inspection.",
+            )],
+        );
 
         let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
             text: Some("已分析。".into()),
@@ -1104,7 +1532,7 @@ max_tool_rounds = 10
             memory,
             config,
             None,
-            Some(skill_registry),
+            Some(skill_registry.clone()),
         )
         .await;
 
@@ -1119,18 +1547,451 @@ max_tool_rounds = 10
             ChatMessage::assistant("文件 设备数据导出.xlsx 在当前工作区未找到。"),
         ];
 
+        let candidates = agent.select_skill_candidates(&msg.content.to_text(), &history);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, "xlsx");
+
         let (reply, _persist) = agent.handle(&msg, &history).await;
 
         assert_eq!(reply.content, "已分析。");
         let llm_messages = mock_llm.last_messages();
+        let expected_location = skill_registry.find("xlsx").unwrap().prompt_location();
         assert!(llm_messages.iter().any(|message| {
             message.role == crate::types::Role::System
-                && message.content.contains("# Activated Skill: xlsx")
-                && message
-                    .content
-                    .contains("Use pandas for spreadsheet inspection.")
+                && message.content.contains("<available_skills>")
+                && message.content.contains("<name>xlsx</name>")
+                && message.content.contains(&expected_location)
         }));
+        assert!(
+            !llm_messages
+                .iter()
+                .any(|message| message.content.contains("# Activated Skill:"))
+        );
 
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        let _ = std::fs::remove_dir_all(&skill_dir);
+    }
+
+    #[tokio::test]
+    async fn test_select_skill_candidates_matches_standard_skill_description() {
+        let memory = test_memory().await;
+        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_description_workspace");
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let config = test_config_with_workspace(&workspace_dir);
+
+        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_description_registry");
+        let skill_registry = create_skill_registry(
+            &skill_dir,
+            &[(
+                "xlsx",
+                "---\nname: xlsx\ndescription: Use this skill any time a spreadsheet file is the primary input or output. Trigger when users want to inspect, edit, or create Excel and tabular files.\n---\nBody",
+            )],
+        );
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+        }]));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            Some(skill_registry.clone()),
+            vec![],
+            Some(&config.skills),
+        ));
+        let agent = AgentCore::new(
+            mock_llm,
+            None,
+            tools,
+            memory,
+            config,
+            None,
+            Some(skill_registry),
+        )
+        .await;
+
+        let candidates =
+            agent.select_skill_candidates("Please inspect this spreadsheet for me", &[]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, "xlsx");
+
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        let _ = std::fs::remove_dir_all(&skill_dir);
+    }
+
+    #[tokio::test]
+    async fn test_select_skill_candidates_prefers_keyword_match_over_trigger_match() {
+        let memory = test_memory().await;
+        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_keyword_workspace");
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let config = test_config_with_workspace(&workspace_dir);
+
+        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_keyword_registry");
+        let skill_registry = create_skill_registry(
+            &skill_dir,
+            &[
+                (
+                    "keyword-skill",
+                    "---\nname: keyword-skill\ndescription: keyword\nkeywords:\n  - spreadsheet\npriority: 10\n---\nBody",
+                ),
+                (
+                    "trigger-skill",
+                    "---\nname: trigger-skill\ndescription: trigger\ntrigger: spreadsheet\npriority: 10\n---\nBody",
+                ),
+            ],
+        );
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+        }]));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            Some(skill_registry.clone()),
+            vec![],
+            Some(&config.skills),
+        ));
+        let agent = AgentCore::new(
+            mock_llm,
+            None,
+            tools,
+            memory,
+            config,
+            None,
+            Some(skill_registry),
+        )
+        .await;
+
+        let candidates = agent.select_skill_candidates("Please inspect this spreadsheet", &[]);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].name, "keyword-skill");
+        assert_eq!(candidates[1].name, "trigger-skill");
+
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        let _ = std::fs::remove_dir_all(&skill_dir);
+    }
+
+    #[tokio::test]
+    async fn test_select_skill_candidates_prefers_higher_priority_when_scores_tie() {
+        let memory = test_memory().await;
+        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_priority_workspace");
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let config = test_config_with_workspace(&workspace_dir);
+
+        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_priority_registry");
+        let skill_registry = create_skill_registry(
+            &skill_dir,
+            &[
+                (
+                    "low-priority",
+                    "---\nname: low-priority\ndescription: low\nkeywords:\n  - spreadsheet\npriority: 10\n---\nBody",
+                ),
+                (
+                    "high-priority",
+                    "---\nname: high-priority\ndescription: high\nkeywords:\n  - spreadsheet\npriority: 90\n---\nBody",
+                ),
+            ],
+        );
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+        }]));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            Some(skill_registry.clone()),
+            vec![],
+            Some(&config.skills),
+        ));
+        let agent = AgentCore::new(
+            mock_llm,
+            None,
+            tools,
+            memory,
+            config,
+            None,
+            Some(skill_registry),
+        )
+        .await;
+
+        let candidates = agent.select_skill_candidates("Please inspect this spreadsheet", &[]);
+        assert_eq!(candidates[0].name, "high-priority");
+        assert_eq!(candidates[1].name, "low-priority");
+
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        let _ = std::fs::remove_dir_all(&skill_dir);
+    }
+
+    #[tokio::test]
+    async fn test_select_skill_candidates_prefers_extension_signal_over_generic_description() {
+        let memory = test_memory().await;
+        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_extension_workspace");
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::write(workspace_dir.join("report.xlsx"), "fake").unwrap();
+        let config = test_config_with_workspace(&workspace_dir);
+
+        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_extension_registry");
+        let skill_registry = create_skill_registry(
+            &skill_dir,
+            &[
+                (
+                    "generic-description",
+                    "---\nname: generic-description\ndescription: Use this skill when users ask for help with spreadsheet analysis.\npriority: 10\n---\nBody",
+                ),
+                (
+                    "xlsx-skill",
+                    "---\nname: xlsx-skill\ndescription: xlsx\nextensions:\n  - .xlsx\npriority: 10\n---\nBody",
+                ),
+            ],
+        );
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+        }]));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            Some(skill_registry.clone()),
+            vec![],
+            Some(&config.skills),
+        ));
+        let agent = AgentCore::new(
+            mock_llm,
+            None,
+            tools,
+            memory,
+            config,
+            None,
+            Some(skill_registry),
+        )
+        .await;
+
+        let candidates = agent.select_skill_candidates(
+            "Please inspect report.xlsx and help with this spreadsheet",
+            &[],
+        );
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].name, "xlsx-skill");
+        assert_eq!(candidates[1].name, "generic-description");
+
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        let _ = std::fs::remove_dir_all(&skill_dir);
+    }
+
+    #[tokio::test]
+    async fn test_select_skill_candidates_ignores_description_stopwords() {
+        let memory = test_memory().await;
+        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_stopwords_workspace");
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let config = test_config_with_workspace(&workspace_dir);
+
+        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_stopwords_registry");
+        let skill_registry = create_skill_registry(
+            &skill_dir,
+            &[(
+                "generic-stopwords",
+                "---\nname: generic-stopwords\ndescription: the and with this input output\n---\nBody",
+            )],
+        );
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+        }]));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            Some(skill_registry.clone()),
+            vec![],
+            Some(&config.skills),
+        ));
+        let agent = AgentCore::new(
+            mock_llm,
+            None,
+            tools,
+            memory,
+            config,
+            None,
+            Some(skill_registry),
+        )
+        .await;
+
+        let candidates = agent.select_skill_candidates("Please help me", &[]);
+        assert!(candidates.is_empty());
+
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        let _ = std::fs::remove_dir_all(&skill_dir);
+    }
+
+    #[tokio::test]
+    async fn test_select_skill_candidates_matches_chinese_description_phrase() {
+        let memory = test_memory().await;
+        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_chinese_workspace");
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let config = test_config_with_workspace(&workspace_dir);
+
+        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_chinese_registry");
+        let skill_registry = create_skill_registry(
+            &skill_dir,
+            &[(
+                "xlsx-cn",
+                "---\nname: xlsx-cn\ndescription: 处理电子表格文件\n---\nBody",
+            )],
+        );
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+        }]));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            Some(skill_registry.clone()),
+            vec![],
+            Some(&config.skills),
+        ));
+        let agent = AgentCore::new(
+            mock_llm,
+            None,
+            tools,
+            memory,
+            config,
+            None,
+            Some(skill_registry),
+        )
+        .await;
+
+        let candidates = agent.select_skill_candidates("帮我处理这个电子表格", &[]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, "xlsx-cn");
+
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        let _ = std::fs::remove_dir_all(&skill_dir);
+    }
+
+    #[tokio::test]
+    async fn test_select_skill_candidates_description_does_not_beat_specific_keyword_match() {
+        let memory = test_memory().await;
+        let workspace_dir =
+            std::env::temp_dir().join("anqclaw_test_skill_description_weight_workspace");
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let config = test_config_with_workspace(&workspace_dir);
+
+        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_description_weight_registry");
+        let skill_registry = create_skill_registry(
+            &skill_dir,
+            &[
+                (
+                    "generic-description",
+                    "---\nname: generic-description\ndescription: Use this skill when users want help with spreadsheet files.\npriority: 10\n---\nBody",
+                ),
+                (
+                    "keyword-skill",
+                    "---\nname: keyword-skill\ndescription: keyword\nkeywords:\n  - spreadsheet\npriority: 10\n---\nBody",
+                ),
+            ],
+        );
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+        }]));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            Some(skill_registry.clone()),
+            vec![],
+            Some(&config.skills),
+        ));
+        let agent = AgentCore::new(
+            mock_llm,
+            None,
+            tools,
+            memory,
+            config,
+            None,
+            Some(skill_registry),
+        )
+        .await;
+
+        let candidates = agent.select_skill_candidates("Please inspect this spreadsheet", &[]);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].name, "keyword-skill");
+        assert_eq!(candidates[1].name, "generic-description");
+
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        let _ = std::fs::remove_dir_all(&skill_dir);
+    }
+
+    #[tokio::test]
+    async fn test_select_skill_candidates_ignores_disable_model_invocation() {
+        let memory = test_memory().await;
+        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_hidden_workspace");
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::write(workspace_dir.join("report.xlsx"), "fake").unwrap();
+        let config = test_config_with_workspace(&workspace_dir);
+
+        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_hidden_registry");
+        let skill_registry = create_skill_registry(
+            &skill_dir,
+            &[
+                (
+                    "hidden-xlsx",
+                    "---\nname: hidden-xlsx\ndescription: hidden\nextensions:\n  - .xlsx\ndisable_model_invocation: true\n---\nBody",
+                ),
+                (
+                    "visible-xlsx",
+                    "---\nname: visible-xlsx\ndescription: visible\nextensions:\n  - .xlsx\n---\nBody",
+                ),
+            ],
+        );
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+        }]));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            Some(skill_registry.clone()),
+            vec![],
+            Some(&config.skills),
+        ));
+        let agent = AgentCore::new(
+            mock_llm,
+            None,
+            tools,
+            memory,
+            config,
+            None,
+            Some(skill_registry),
+        )
+        .await;
+
+        let candidates = agent.select_skill_candidates("请看下这个表格", &[]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, "visible-xlsx");
+
+        let _ = std::fs::remove_dir_all(&workspace_dir);
         let _ = std::fs::remove_dir_all(&skill_dir);
     }
 }

@@ -1,3 +1,8 @@
+//! @file
+//! @author lijianqiao
+//! @since 2026-03-31
+//! @brief 定义应用配置各分段的数据结构。
+
 use secrecy::SecretString;
 use serde::Deserialize;
 
@@ -45,6 +50,12 @@ pub struct SkillsSection {
     pub skills_dir: String,
     #[serde(default = "default_max_active_skills")]
     pub max_active_skills: u32,
+    #[serde(default = "default_max_skills_in_prompt")]
+    pub max_skills_in_prompt: u32,
+    #[serde(default = "default_max_skill_prompt_chars")]
+    pub max_skill_prompt_chars: u32,
+    #[serde(default = "default_max_skill_file_bytes")]
+    pub max_skill_file_bytes: u64,
 }
 
 impl Default for SkillsSection {
@@ -53,6 +64,9 @@ impl Default for SkillsSection {
             enabled: default_skills_enabled(),
             skills_dir: default_skills_dir(),
             max_active_skills: default_max_active_skills(),
+            max_skills_in_prompt: default_max_skills_in_prompt(),
+            max_skill_prompt_chars: default_max_skill_prompt_chars(),
+            max_skill_file_bytes: default_max_skill_file_bytes(),
         }
     }
 }

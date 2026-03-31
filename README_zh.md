@@ -9,6 +9,7 @@ anqclaw 是一个用 Rust 构建的私人 AI 助理，当前支持飞书、HTTP 
 - 多 LLM Profile：Anthropic、OpenAI-compatible、Ollama 等
 - Agentic Loop：LLM 与工具多轮协作，支持 tool calling 与流式回复
 - 多通道接入：Feishu、HTTP API、CLI
+- Skills 主链：候选 skill 以结构化 `<available_skills>` 暴露，模型按需读取 `SKILL.md`
 - 内置工具：shell、web、file、memory、pdf_read、image_info、custom tool
 - SQLite 对话历史与长期记忆，长期记忆采用 source table + FTS5 索引镜像
 - Python 任务自举：支持在工作区自动准备 `.venv` 并执行脚本
@@ -27,8 +28,17 @@ Feishu/HTTP/CLI Channel -> Gateway -> AgentCore -> ToolRegistry/MemoryStore -> C
 - `agent`：上下文拼装、环境探测、agentic loop
 - `llm`：多 Provider 抽象与客户端
 - `tool`：工具注册与执行
+- `skill`：多源 skills 扫描、候选摘要生成与热重载
 - `memory`：SQLite 历史与长期记忆
 - `audit` / `metrics` / `scheduler`：审计、指标与后台任务
+
+## Skills 主链
+
+- Skill 包采用目录式结构：`skills/<name>/SKILL.md`
+- Skills 来源按 `bundled -> user(~/.anqclaw/skills) -> workspace(<workspace>/skills_dir)` 合并，后加载来源覆盖先加载来源
+- Agent 会先按 `description` 做自动候选匹配，并结合 `keywords`、`trigger`、`extensions`、历史文件名和 workspace 扩展名做增强排序，再把可读路径以结构化 `<available_skills>` 注入 system prompt，而不是直接注入 skill 正文
+- 模型命中 skill 后，主路径是通过 `file_read` 按需读取对应 `SKILL.md`；`activate_skill` 仅保留为兼容或调试入口
+- `serve` 模式下支持技能目录热重载，并记录触发 reload 的文件路径，便于审计
 
 ## 部署
 
@@ -187,7 +197,7 @@ cargo build --release
 - 本地已完成 `cargo test --manifest-path agent/Cargo.toml`
 - 本地验证也包括 `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo audit` 已纳入本地依赖检查；当前仍有少量来自上游传递依赖的告警
-- 最近一轮修复已覆盖 custom tool、trusted path、web SSRF、stream 中断、Feishu token 刷新、长期记忆并发写入等回归场景
+- 最近一轮修复已覆盖 custom tool、trusted path、web SSRF、stream 中断、Feishu token 刷新、长期记忆并发写入，以及 skills 候选筛选与按需读取主链等回归场景
 
 ## 文档
 

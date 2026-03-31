@@ -1,7 +1,9 @@
 //! System prompt construction and memory formatting.
 //!
 //! Loads workspace prompt files (SOUL.md, AGENTS.md, TOOLS.md, USER.md,
-//! MEMORY.md) and assembles them into a single system prompt string.
+//! MEMORY.md) and assembles them into a single system prompt string, then
+//! appends dynamic sections such as structured available skills and runtime
+//! environment details.
 
 use crate::config::AppConfig;
 use crate::memory::Memory;

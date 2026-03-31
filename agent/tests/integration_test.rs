@@ -7,6 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 
 use anyhow::Result;
 
@@ -14,6 +15,7 @@ use anqclaw::agent::AgentCore;
 use anqclaw::config::AppConfig;
 use anqclaw::llm::LlmClient;
 use anqclaw::memory::MemoryStore;
+use anqclaw::skill::{SkillRegistry, SkillSource};
 use anqclaw::tool::ToolRegistry;
 use anqclaw::types::*;
 
@@ -22,6 +24,7 @@ use anqclaw::types::*;
 struct MockLlm {
     responses: Vec<LlmResponse>,
     call_count: AtomicU32,
+    last_messages: Mutex<Vec<ChatMessage>>,
 }
 
 impl MockLlm {
@@ -29,17 +32,26 @@ impl MockLlm {
         Self {
             responses,
             call_count: AtomicU32::new(0),
+            last_messages: Mutex::new(Vec::new()),
         }
+    }
+
+    fn last_messages(&self) -> Vec<ChatMessage> {
+        self.last_messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
 impl LlmClient for MockLlm {
     fn chat<'a>(
         &'a self,
-        _messages: &'a [ChatMessage],
+        messages: &'a [ChatMessage],
         _tools: &'a [ToolDefinition],
     ) -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + 'a>> {
         Box::pin(async {
+            *self.last_messages.lock().unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
             let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
             if idx < self.responses.len() {
                 Ok(self.responses[idx].clone())
@@ -92,6 +104,38 @@ fn test_inbound(text: &str) -> InboundMessage {
         trace_id: String::new(),
         images: vec![],
     }
+}
+
+fn test_config_with_file_access(workspace: &std::path::Path) -> Arc<AppConfig> {
+    let workspace = workspace.to_string_lossy().replace('\\', "/");
+    let toml_str = format!(
+        r#"
+[app]
+name = "integration-test"
+workspace = "{workspace}"
+log_level = "debug"
+
+[feishu]
+app_id = "test_app_id"
+app_secret = "test_secret"
+
+[llm]
+provider = "anthropic"
+model = "test-model"
+api_key = "test_key"
+
+[tools]
+shell_enabled = false
+file_enabled = true
+file_access_dir = "{workspace}"
+web_fetch_enabled = false
+memory_tool_enabled = false
+
+[agent]
+max_tool_rounds = 5
+"#
+    );
+    Arc::new(AppConfig::load_from_str(&toml_str).unwrap())
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -343,4 +387,87 @@ max_tool_rounds = 2
     let (reply, _) = agent.handle(&msg, &[]).await;
 
     assert!(reply.content.contains("最大轮次限制"));
+}
+
+#[tokio::test]
+async fn test_skill_summary_path_can_be_read_via_file_read() {
+    let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_summary_workspace");
+    let skill_root = std::env::temp_dir().join("anqclaw_test_skill_summary_user_skills");
+    let _ = std::fs::remove_dir_all(&workspace_dir);
+    let _ = std::fs::remove_dir_all(&skill_root);
+    std::fs::create_dir_all(&workspace_dir).unwrap();
+    std::fs::create_dir_all(skill_root.join("xlsx")).unwrap();
+
+    let skill_path = skill_root.join("xlsx").join("SKILL.md");
+    std::fs::write(
+        &skill_path,
+        "---\nname: xlsx\ndescription: Spreadsheet skill\nextensions:\n  - .xlsx\n---\nUse pandas for spreadsheet inspection.",
+    )
+    .unwrap();
+
+    let config = test_config_with_file_access(&workspace_dir);
+    let memory = Arc::new(MemoryStore::new(":memory:").await.unwrap());
+    let skill_registry = Arc::new(SkillRegistry::scan(
+        vec![SkillSource::new("user", skill_root.clone())],
+        256 * 1024,
+    ));
+    let skill_path_for_tool = skill_path.to_string_lossy().replace('\\', "/");
+
+    let mock_llm = Arc::new(MockLlm::new(vec![
+        LlmResponse {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "call_read_skill".into(),
+                name: "file_read".into(),
+                arguments: serde_json::json!({
+                    "path": skill_path_for_tool,
+                }),
+            }],
+        },
+        LlmResponse {
+            text: Some("Skill loaded via file_read.".into()),
+            tool_calls: vec![],
+        },
+    ]));
+
+    let tools = Arc::new(ToolRegistry::new(
+        &config.tools,
+        &config.security,
+        &config.agent,
+        memory.clone(),
+        Some(skill_registry.clone()),
+        vec![],
+        Some(&config.skills),
+    ));
+    let agent = AgentCore::new(
+        mock_llm.clone(),
+        None,
+        tools,
+        memory,
+        config,
+        None,
+        Some(skill_registry.clone()),
+    )
+    .await;
+
+    let msg = test_inbound("请查看这个 xlsx skill 怎么做表格分析");
+    let (reply, persist) = agent.handle(&msg, &[]).await;
+
+    assert_eq!(reply.content, "Skill loaded via file_read.");
+    assert!(persist.iter().any(|message| {
+        message.role == Role::Tool
+            && message.content.contains("Use pandas for spreadsheet inspection.")
+    }));
+
+    let llm_messages = mock_llm.last_messages();
+    let expected_location = skill_registry.find("xlsx").unwrap().prompt_location();
+    assert!(llm_messages.iter().any(|message| {
+        message.role == Role::System
+            && message.content.contains("<available_skills>")
+            && message.content.contains("<name>xlsx</name>")
+            && message.content.contains(&expected_location)
+    }));
+
+    let _ = std::fs::remove_dir_all(&workspace_dir);
+    let _ = std::fs::remove_dir_all(&skill_root);
 }

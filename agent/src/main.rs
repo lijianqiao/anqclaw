@@ -1,3 +1,8 @@
+//! @file
+//! @author lijianqiao
+//! @since 2026-03-31
+//! @brief 负责 anqclaw 的启动、装配与命令行入口。
+
 mod agent;
 mod audit;
 mod channel;
@@ -15,6 +20,8 @@ mod token;
 mod tool;
 mod types;
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -161,6 +168,35 @@ struct Bootstrap {
     home: std::path::PathBuf,
 }
 
+fn bundled_skills_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("skills")))
+}
+
+fn collect_skill_sources(
+    home: &Path,
+    workspace: &Path,
+    skills_dir: &str,
+) -> Vec<skill::SkillSource> {
+    let mut seen = HashSet::new();
+    let mut sources = Vec::new();
+
+    let mut push_source = |name: &str, dir: PathBuf| {
+        if seen.insert(dir.clone()) {
+            sources.push(skill::SkillSource::new(name, dir));
+        }
+    };
+
+    if let Some(dir) = bundled_skills_dir() {
+        push_source("bundled", dir);
+    }
+    push_source("user", home.join("skills"));
+    push_source("workspace", resolve_path(workspace, skills_dir));
+
+    sources
+}
+
 async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
     let home = anqclaw_home();
     ensure_dirs(&home)?;
@@ -279,7 +315,10 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
             .into_owned();
         match audit::AuditLogger::new(&audit_path) {
             Ok(logger) => {
-                tracing::info!(path = audit_path.as_str(), "audit logging enabled / 审计日志已启用");
+                tracing::info!(
+                    path = audit_path.as_str(),
+                    "audit logging enabled / 审计日志已启用"
+                );
                 Some(Arc::new(logger))
             }
             Err(e) => {
@@ -291,13 +330,27 @@ async fn bootstrap(cli_config: Option<String>) -> anyhow::Result<Bootstrap> {
         None
     };
 
-    // Scan skills directory
+    // Scan skills directories
     let skill_registry = if config.skills.enabled {
-        let skills_dir = resolve_path(&home, &config.skills.skills_dir);
-        let registry = Arc::new(skill::SkillRegistry::scan(&skills_dir));
+        let skill_sources = collect_skill_sources(
+            &home,
+            Path::new(&config.app.workspace),
+            &config.skills.skills_dir,
+        );
+        let registry = Arc::new(skill::SkillRegistry::scan(
+            skill_sources,
+            config.skills.max_skill_file_bytes,
+        ));
         tracing::info!(
-            dir = %skills_dir.display(),
+            dirs = ?registry
+                .sources()
+                .iter()
+                .map(|source| format!("{}:{}", source.name, source.dir.display()))
+                .collect::<Vec<_>>(),
             count = registry.list().len(),
+            max_skill_file_bytes = config.skills.max_skill_file_bytes,
+            prompt_mainline = "available_skills+file_read",
+            activate_skill = "compatibility_debug",
             "skills scanned / 技能已扫描"
         );
         Some(registry)
@@ -418,7 +471,9 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
     }
 
     if channels.is_empty() {
-        tracing::warn!("no channels configured, only heartbeat/scheduler will run (if enabled) / 未配置频道，仅心跳/调度器运行（如已启用）");
+        tracing::warn!(
+            "no channels configured, only heartbeat/scheduler will run (if enabled) / 未配置频道，仅心跳/调度器运行（如已启用）"
+        );
     }
 
     let gateway = Gateway::new(
@@ -467,7 +522,10 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
             channels.clone(),
             &bs.home,
         );
-        tracing::info!(task_count = sched.task_count(), "scheduler enabled / 调度器已启用");
+        tracing::info!(
+            task_count = sched.task_count(),
+            "scheduler enabled / 调度器已启用"
+        );
         Some(tokio::spawn(async move {
             if let Err(e) = sched.run().await {
                 tracing::error!(error = %e, "scheduler exited with error / 调度器退出并出错");
@@ -478,7 +536,9 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
         None
     };
 
-    tracing::info!("anqclaw serve started, press Ctrl+C to stop / anqclaw 服务已启动，按 Ctrl+C 停止");
+    tracing::info!(
+        "anqclaw serve started, press Ctrl+C to stop / anqclaw 服务已启动，按 Ctrl+C 停止"
+    );
 
     // Wait for shutdown
     tokio::signal::ctrl_c().await?;
@@ -492,7 +552,9 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
         sh.abort();
     }
 
-    tracing::info!("waiting for in-flight tasks to finish (max 30s) / 等待进行中的任务完成（最多 30 秒）...");
+    tracing::info!(
+        "waiting for in-flight tasks to finish (max 30s) / 等待进行中的任务完成（最多 30 秒）..."
+    );
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::time::sleep(std::time::Duration::from_millis(500)),

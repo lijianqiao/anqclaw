@@ -10,6 +10,7 @@
 - 多 LLM 支持：Anthropic client + OpenAI-compatible client（覆盖 GPT/Gemini/DeepSeek/Qwen/MiMo 等）
 - 多轮对话 + SQLite 持久化历史
 - Tool calling agentic loop（6 个内置工具）
+- Skills 主链：候选 skills 结构化暴露，模型按需读取 `SKILL.md`
 - 接收多种消息类型（Text/Image/File/RichText），发送纯文本
 - Heartbeat 定时任务
 - 全部可配置项通过 TOML 管理
@@ -43,6 +44,7 @@ agent/
 │   │   ├── mod.rs              # AgentCore：agentic loop
 │   │   ├── context.rs          # 上下文构建（system prompt + memory + history）
 │   │   └── prompt.rs           # System prompt 模板
+│   ├── skill.rs                # skills 扫描、摘要生成与热重载
 │   │
 │   ├── llm/
 │   │   ├── mod.rs              # trait LlmClient + LlmResponse 类型
@@ -440,11 +442,12 @@ impl AgentCore {
 1. SOUL.md         → 性格基底
 2. AGENTS.md       → 行为规则
 3. TOOLS.md        → 工具指南 + 环境信息 + 红线
-4. USER.md         → 用户信息
-5. MEMORY.md       → 预置记忆
-6. SQLite 记忆搜索  → 动态相关记忆
-7. 对话历史
-8. 当前用户消息
+4. available_skills → 候选 skill 摘要 + 可读 location
+5. USER.md         → 用户信息
+6. MEMORY.md       → 预置记忆
+7. SQLite 记忆搜索  → 动态相关记忆
+8. 对话历史
+9. 当前用户消息
 ```
 
 **关键设计**：
@@ -453,6 +456,10 @@ impl AgentCore {
 - 并发执行 tool calls（`join_all`），单个工具失败返回错误信息给 LLM，不终止 loop
 - 非文本消息：`to_text()` 对 Image/File 返回描述文本（如 `[图片: image_key_xxx]`）
 - System prompt 文件（SOUL.md 等）不存在则跳过，不报错
+- skills 先读取标准 skill 的 `description` 做自动候选筛选，并结合 `keywords`、`trigger`、`extensions`、历史文件名和 workspace 扩展名做增强排序，再以结构化 `<available_skills>` 注入 system prompt，而不是自动把 skill 正文直接注入 system messages
+- skills 主链是模型通过 `file_read` 按需读取对应 `SKILL.md`；`activate_skill` 只作为兼容或调试入口
+- 候选 skills 来源按 `bundled -> user(~/.anqclaw/skills) -> workspace(<workspace>/skills_dir)` 合并，后加载来源覆盖先加载来源
+- `serve` 模式下对 skill 来源目录做热重载，reload 前记录触发变更的具体文件路径
 
 ---
 
@@ -480,14 +487,16 @@ impl ToolRegistry {
 
 ### 内置工具
 
-| 工具 | 文件 | 输入 | 输出 | 安全约束 |
-|------|------|------|------|----------|
-| `shell_exec` | shell.rs | `command: String` | stdout + stderr | 白名单命令，超时 `shell_timeout_secs` |
-| `web_fetch` | web.rs | `url: String` | 网页纯文本 | 超时 `web_fetch_timeout_secs`，最大 `web_fetch_max_bytes` |
-| `file_read` | file.rs | `path: String` | 文件内容 | 限制在 `file_access_dir` 内 |
-| `file_write` | file.rs | `path: String, content: String` | 写入确认 | 限制在 `file_access_dir` 内 |
-| `memory_save` | memory_tool.rs | `key: String, content: String, tags: Vec<String>` | 保存确认 | 无 |
-| `memory_search` | memory_tool.rs | `query: String, limit?: usize` | 匹配记忆列表 | 默认 `memory_tool_search_limit` |
+| 工具            | 文件           | 输入                                              | 输出            | 安全约束                                                  |
+| --------------- | -------------- | ------------------------------------------------- | --------------- | --------------------------------------------------------- |
+| `shell_exec`    | shell.rs       | `command: String`                                 | stdout + stderr | 白名单命令，超时 `shell_timeout_secs`                     |
+| `web_fetch`     | web.rs         | `url: String`                                     | 网页纯文本      | 超时 `web_fetch_timeout_secs`，最大 `web_fetch_max_bytes` |
+| `file_read`     | file.rs        | `path: String`                                    | 文件内容        | 限制在 `file_access_dir` 内                               |
+| `file_write`    | file.rs        | `path: String, content: String`                   | 写入确认        | 限制在 `file_access_dir` 内                               |
+| `memory_save`   | memory_tool.rs | `key: String, content: String, tags: Vec<String>` | 保存确认        | 无                                                        |
+| `memory_search` | memory_tool.rs | `query: String, limit?: usize`                    | 匹配记忆列表    | 默认 `memory_tool_search_limit`                           |
+
+> 说明：当前实现仍保留 `activate_skill` 工具，但它只用于兼容或调试，不是 skills 主链的一部分。
 
 **实现要点**：
 
@@ -496,6 +505,7 @@ impl ToolRegistry {
 - **file_read / file_write**：`tokio::fs`，路径 canonicalize 后校验前缀，防止路径穿越
 - **memory_save / memory_search**：调用 `MemoryStore` 方法的薄封装
 - **工具开关**：配置中 `xxx_enabled = false` 时不注册到 ToolRegistry
+- **skills 主链约束**：`file_read` 默认受 `file_access_dir` 约束，但会额外允许读取受信任的 skill source 目录，使 `<available_skills>` 中暴露的 `SKILL.md` 路径可读
 
 ---
 
@@ -647,9 +657,24 @@ memory_tool_search_limit = 5
 [agent]
 max_tool_rounds = 10
 system_prompt_file = ""                # 自定义 system prompt，空则从 workspace/*.md 拼装
+
+[skills]
+enabled = true
+skills_dir = "skills"                  # workspace 相对目录；同时还会加载 bundled 和 ~/.anqclaw/skills
+max_active_skills = 3
+max_skills_in_prompt = 32
+max_skill_prompt_chars = 12000
+max_skill_file_bytes = 262144
 ```
 
 **config.rs**：每个 section 独立结构体，所有可选字段用 `#[serde(default)]` 提供默认值。必填字段：`feishu.app_id`、`feishu.app_secret`、`llm.api_key`。敏感字段用 `secrecy::SecretString` 包装。
+
+**skills 配置语义**：
+
+- `skills_dir` 仍表示 workspace 下的相对目录，但运行时会与 bundled、user 来源一起合并加载
+- `max_skills_in_prompt` 与 `max_skill_prompt_chars` 用于限制 `<available_skills>` 的数量和字符预算
+- `max_skill_file_bytes` 用于拒绝超大 `SKILL.md`，并输出稳定告警日志
+- 标准 Anthropic / Agent Skills 风格的 `description` 会参与自动候选匹配；`keywords`、`trigger`、`extensions` 是增强信号，而不是 skill 生效的唯一入口
 
 ---
 
@@ -665,14 +690,20 @@ workspace/
 └── HEARTBEAT.md   # Heartbeat prompt：定时任务触发时的提示词
 ```
 
-| 文件 | 定位 | 加载时机 |
-|------|------|----------|
-| SOUL.md | 性格、语气、风格 | 每次构建 system prompt |
-| AGENTS.md | 行为逻辑、决策规则 | 每次构建 system prompt |
-| TOOLS.md | 工具使用指南、环境信息、安全红线 | 每次构建 system prompt |
-| USER.md | 用户个人信息和偏好 | 每次构建 system prompt |
-| MEMORY.md | 预置的重要事实 | 每次构建 system prompt |
-| HEARTBEAT.md | 定时任务 prompt | 每次 heartbeat tick |
+| 文件         | 定位                             | 加载时机               |
+| ------------ | -------------------------------- | ---------------------- |
+| SOUL.md      | 性格、语气、风格                 | 每次构建 system prompt |
+| AGENTS.md    | 行为逻辑、决策规则               | 每次构建 system prompt |
+| TOOLS.md     | 工具使用指南、环境信息、安全红线 | 每次构建 system prompt |
+| USER.md      | 用户个人信息和偏好               | 每次构建 system prompt |
+| MEMORY.md    | 预置的重要事实                   | 每次构建 system prompt |
+| HEARTBEAT.md | 定时任务 prompt                  | 每次 heartbeat tick    |
+
+**skills 约定**：
+
+- skill 包采用目录式结构：`skills/<name>/SKILL.md`
+- workspace skills 只是三层来源中的一层；实际加载顺序为 bundled、user、workspace
+- system prompt 只暴露候选 skill 摘要与 `location`，不直接拼接 skill 正文；标准 skill 的 `description` 需要写出用户自然会说的关键词，供自动候选筛选使用
 
 ---
 
@@ -758,7 +789,9 @@ lru = "0.13"
   → 白名单检查
   → InboundMessage → mpsc → Gateway
   → Gateway: SQLite 加载历史 → AgentCore.handle()
-  → AgentCore: 构建上下文 → LLM → [tool loop] → 最终回复
+    → AgentCore: 构建上下文 + 生成 available_skills
+    → LLM: 必要时通过 file_read 读取 SKILL.md
+    → LLM → [tool loop] → 最终回复
   → Gateway: 保存对话到 SQLite → channel.send_message()
   → FeishuChannel: REST API 发送回复
 ```

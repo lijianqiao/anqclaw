@@ -1,3 +1,8 @@
+//! @file
+//! @author lijianqiao
+//! @since 2026-03-31
+//! @brief 提供配置结构体使用的默认值函数。
+
 // ─── Default value helpers ────────────────────────────────────────────────────
 //
 // Each function is referenced by `#[serde(default = "...")]` on config structs.
@@ -193,6 +198,15 @@ pub(crate) fn default_skills_dir() -> String {
 }
 pub(crate) fn default_max_active_skills() -> u32 {
     3
+}
+pub(crate) fn default_max_skills_in_prompt() -> u32 {
+    32
+}
+pub(crate) fn default_max_skill_prompt_chars() -> u32 {
+    12_000
+}
+pub(crate) fn default_max_skill_file_bytes() -> u64 {
+    256 * 1024
 }
 pub(crate) fn default_session_key_strategy() -> String {
     "chat".to_string()

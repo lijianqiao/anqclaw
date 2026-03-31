@@ -1,8 +1,8 @@
-//! `activate_skill` tool — loads a skill's full prompt on demand.
+//! `activate_skill` tool — compatibility path for explicitly loading a skill.
 //!
-//! When the LLM determines a user's request matches a skill, it calls this tool
-//! to load the complete skill prompt. The returned content is injected into the
-//! conversation as a tool result, giving the LLM the full context to respond.
+//! The preferred mainline is now: model scans `<available_skills>` and reads
+//! `SKILL.md` via `file_read`. This tool remains available for compatibility
+//! and debugging when an explicit skill activation is still needed.
 //!
 //! Tracks activated skills and enforces the `max_active_skills` limit.
 
@@ -41,7 +41,7 @@ impl Tool for ActivateSkill {
     }
 
     fn description(&self) -> &str {
-        "Load a specialized skill prompt by name. Call this BEFORE responding when the user's request matches a skill. Returns the full skill prompt content."
+        "Compatibility/debug tool: explicitly load a skill prompt by name. Prefer reading the SKILL.md path exposed in <available_skills>; use this only when explicit activation is required."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -65,7 +65,9 @@ impl Tool for ActivateSkill {
             let skill_name = args
                 .get("skill_name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("missing `skill_name` parameter / 缺少 `skill_name` 参数"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("missing `skill_name` parameter / 缺少 `skill_name` 参数")
+                })?;
 
             let content = self.registry.load_content(skill_name)?;
 

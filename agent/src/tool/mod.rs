@@ -69,6 +69,15 @@ impl ToolRegistry {
         skills_config: Option<&SkillsSection>,
     ) -> Self {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        let mut file_read_trusted_dirs = security.trusted_dirs.clone();
+        if let Some(registry) = skill_registry.as_ref() {
+            for source in registry.sources() {
+                let source_dir = source.dir.to_string_lossy().into_owned();
+                if !file_read_trusted_dirs.iter().any(|dir| dir == &source_dir) {
+                    file_read_trusted_dirs.push(source_dir);
+                }
+            }
+        }
 
         // Merge hardcoded blocked dirs with config blocked dirs (computed once, reused below)
         let all_blocked_dirs: Vec<String> = {
@@ -114,7 +123,7 @@ impl ToolRegistry {
             let read_tool = file::FileRead::new(
                 &config.file_access_dir,
                 all_blocked_dirs.clone(),
-                security.trusted_dirs.clone(),
+                file_read_trusted_dirs,
             );
             let write_tool = file::FileWrite::new(
                 &config.file_access_dir,

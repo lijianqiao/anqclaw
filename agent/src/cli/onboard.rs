@@ -1,6 +1,7 @@
-//! Interactive onboarding wizard for `anqclaw onboard`.
-//!
-//! Creates `~/.anqclaw/` with config.toml and workspace templates.
+//! @file
+//! @author lijianqiao
+//! @since 2026-03-31
+//! @brief 生成初始配置、工作区模板与示例 skills。
 
 use std::io::Write;
 use std::path::Path;
@@ -321,8 +322,16 @@ fn generate_config(
 
     s.push_str("[skills]\n");
     s.push_str("enabled = true\n");
-    s.push_str("skills_dir = \"skills\"\n");
+    s.push_str("# skills 来源按 bundled -> user(~/.anqclaw/skills) -> workspace(<workspace>/skills_dir) 合并，后者覆盖前者\n");
+    s.push_str(
+        "# 主链是 available_skills 暴露候选 skill，再由模型按需通过 file_read 读取对应 SKILL.md\n",
+    );
+    s.push_str("# activate_skill 仅保留给兼容或调试路径，不是默认主流程\n");
+    s.push_str("skills_dir = \"skills\"  # workspace 相对目录；同时还会加载 bundled 和 ~/.anqclaw/skills\n");
     s.push_str("max_active_skills = 3\n");
+    s.push_str("max_skills_in_prompt = 32\n");
+    s.push_str("max_skill_prompt_chars = 12000\n");
+    s.push_str("max_skill_file_bytes = 262144\n");
 
     s
 }
@@ -408,6 +417,8 @@ const TMPL_TOOLS: &str = r#"# 工具使用指南
 
 ## 超级助手工作方式
 
+- 如果 system prompt 暴露了 `<available_skills>`，先按候选 skill 判断是否相关；相关时优先用 `file_read` 读取对应 `SKILL.md`，不要默认先调用 `activate_skill`
+- `activate_skill` 只作为兼容或调试入口；只有显式请求、回归验证或 file_read 不适用时才考虑它
 - 遇到 xlsx/csv/docx、批量数据处理、格式转换、复杂统计时，先用 `file_read` 或安全的 `shell_exec` 列目录确认输入文件存在，再决定是否写 Python 脚本
 - 如果本机缺少 uv / Python，且配置允许自动安装，也必须在确认输入文件存在后，才允许让 `shell_exec` 在工作区自举 `.venv`
 - Python 脚本优先写入工作区的 `script/` 目录；临时输出和分析结果写入工作区其它合适位置，避免污染系统目录

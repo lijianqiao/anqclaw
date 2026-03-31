@@ -9,6 +9,7 @@ anqclaw is a personal AI assistant built in Rust. It currently supports Feishu, 
 - Multiple LLM profiles: Anthropic, OpenAI-compatible, Ollama, and more
 - Agentic loop with tool calling and streaming responses
 - Multi-channel access: Feishu, HTTP API, and CLI
+- Skills mainline: candidate skills are exposed as structured `<available_skills>`, and the model reads `SKILL.md` on demand
 - Built-in tools: shell, web, file, memory, pdf_read, image_info, and custom tools
 - SQLite conversation history and long-term memory, with a source table plus FTS5 index mirror
 - Python task bootstrap: prepares a workspace `.venv` and runs scripts when needed
@@ -27,8 +28,17 @@ Core modules:
 - `agent`: context assembly, environment probing, and the agentic loop
 - `llm`: provider abstraction and client implementations
 - `tool`: tool registration and execution
+- `skill`: multi-source skill scanning, candidate summaries, and hot reload
 - `memory`: SQLite-backed history and long-term memory
 - `audit` / `metrics` / `scheduler`: auditing, metrics, and background tasks
+
+## Skills Mainline
+
+- Skill packages use the directory form: `skills/<name>/SKILL.md`
+- Skill sources are merged in `bundled -> user(~/.anqclaw/skills) -> workspace(<workspace>/skills_dir)` order, with later sources overriding earlier ones
+- The agent uses `description` as an automatic candidate-matching signal, then refines ranking with `keywords`, `trigger`, `extensions`, recent file tokens, and workspace extensions before injecting readable locations through structured `<available_skills>`
+- When a skill is relevant, the primary path is for the model to read the corresponding `SKILL.md` through `file_read`; `activate_skill` remains only as a compatibility or debugging path
+- In `serve` mode, skill directories are hot-reloaded and the triggering file paths are logged for auditability
 
 ## Deployment
 
@@ -187,7 +197,7 @@ Output:
 - Local validation has passed with `cargo test --manifest-path agent/Cargo.toml`
 - Local validation also includes `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo audit` is used as a local dependency check; some remaining advisories are currently inherited from upstream transitive dependencies
-- Recent regression coverage includes custom tools, trusted path handling, web SSRF, interrupted streams, Feishu token refresh, and concurrent long-term memory writes
+- Recent regression coverage includes custom tools, trusted path handling, web SSRF, interrupted streams, Feishu token refresh, concurrent long-term memory writes, and the skills candidate-selection plus on-demand-read mainline
 
 ## Docs
 
