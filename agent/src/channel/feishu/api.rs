@@ -53,8 +53,10 @@ impl FeishuApi {
     }
 
     fn new_with_bases(config: &FeishuSection, api_base: &str, ws_base: &str) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+        let builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
+        #[cfg(test)]
+        let builder = builder.no_proxy();
+        let http = builder
             .build()
             .context("build reqwest client / 构建 reqwest 客户端失败")?;
 
@@ -107,7 +109,9 @@ impl FeishuApi {
         let data: serde_json::Value = resp.json().await?;
 
         if !status.is_success() {
-            anyhow::bail!("tenant_access_token request failed: status={status}, body={data} / tenant_access_token 请求失败: status={status}, body={data}");
+            anyhow::bail!(
+                "tenant_access_token request failed: status={status}, body={data} / tenant_access_token 请求失败: status={status}, body={data}"
+            );
         }
 
         let code = data.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
@@ -116,13 +120,19 @@ impl FeishuApi {
                 .get("msg")
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
-            anyhow::bail!("tenant_access_token failed: code={code}, msg={msg} / tenant_access_token 失败: code={code}, msg={msg}");
+            anyhow::bail!(
+                "tenant_access_token failed: code={code}, msg={msg} / tenant_access_token 失败: code={code}, msg={msg}"
+            );
         }
 
         let token_value = data
             .get("tenant_access_token")
             .and_then(|t| t.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing tenant_access_token in response / 响应中缺少 tenant_access_token"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing tenant_access_token in response / 响应中缺少 tenant_access_token"
+                )
+            })?
             .to_string();
 
         let ttl_secs = data
@@ -296,14 +306,18 @@ impl FeishuApi {
             // Check for expired/invalid token → retry once
             let resp_code = resp_body.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
             if (status.as_u16() == 401 || resp_code == 99_991_663) && attempt == 0 {
-                tracing::warn!("Feishu: token invalid, refreshing and retrying / Feishu: token 无效，正在刷新并重试");
+                tracing::warn!(
+                    "Feishu: token invalid, refreshing and retrying / Feishu: token 无效，正在刷新并重试"
+                );
                 self.invalidate_token().await;
                 token = self.get_tenant_access_token().await?;
                 continue;
             }
 
             if !status.is_success() {
-                anyhow::bail!("Feishu send failed: status={status}, body={resp_body} / Feishu 发送失败: status={status}, body={resp_body}");
+                anyhow::bail!(
+                    "Feishu send failed: status={status}, body={resp_body} / Feishu 发送失败: status={status}, body={resp_body}"
+                );
             }
 
             if resp_code != 0 {
@@ -311,13 +325,17 @@ impl FeishuApi {
                     .get("msg")
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown error");
-                anyhow::bail!("Feishu send failed: code={resp_code}, msg={msg} / Feishu 发送失败: code={resp_code}, msg={msg}");
+                anyhow::bail!(
+                    "Feishu send failed: code={resp_code}, msg={msg} / Feishu 发送失败: code={resp_code}, msg={msg}"
+                );
             }
 
             return Ok(());
         }
 
-        anyhow::bail!("Feishu send failed after token refresh retry / Feishu 发送失败（token 刷新重试后仍失败）")
+        anyhow::bail!(
+            "Feishu send failed after token refresh retry / Feishu 发送失败（token 刷新重试后仍失败）"
+        )
     }
 }
 

@@ -13,8 +13,8 @@ pub mod model_tool;
 pub mod pdf_read;
 pub mod shell;
 pub mod skill_tool;
-pub mod web;
 mod tokenize;
+pub mod web;
 
 use anyhow::Result;
 use std::collections::HashMap;

@@ -183,7 +183,9 @@ fn parse_image_info(bytes: &[u8]) -> Result<(&'static str, Option<(u32, u32)>)> 
         return Ok(("BMP", dims));
     }
 
-    bail!("unrecognized image format (no matching magic bytes) / 无法识别的图片格式（无匹配的魔术字节）");
+    bail!(
+        "unrecognized image format (no matching magic bytes) / 无法识别的图片格式（无匹配的魔术字节）"
+    );
 }
 
 /// Parse JPEG dimensions by scanning for SOF markers.

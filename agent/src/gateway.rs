@@ -13,6 +13,7 @@ use lru::LruCache;
 use std::num::NonZero;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use crate::agent::AgentCore;
 use crate::channel::Channel;
@@ -28,6 +29,36 @@ const GATEWAY_QUEUE_MONITOR_INTERVAL_SECS: u64 = 10;
 const GATEWAY_QUEUE_PRESSURE_MIN_REMAINING_CAPACITY: usize = 64;
 const GATEWAY_GC_INTERVAL_SECS: u64 = 60;
 const GATEWAY_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+const PREVALIDATED_REQUEST_TTL_SECS: u64 = 300;
+const RATE_LIMITER_MAX_ENTRIES: usize = 10_000;
+
+fn evict_oldest_rate_limiter_entries(
+    rate_limiter: &DashMap<String, Vec<Instant>>,
+    max_entries: usize,
+) -> usize {
+    let overflow = rate_limiter.len().saturating_sub(max_entries);
+    if overflow == 0 {
+        return 0;
+    }
+
+    let mut eviction_candidates: Vec<(String, Instant)> = rate_limiter
+        .iter()
+        .map(|entry| {
+            let last_seen = entry.value().last().copied().unwrap_or_else(Instant::now);
+            (entry.key().clone(), last_seen)
+        })
+        .collect();
+    eviction_candidates.sort_by_key(|(_, last_seen)| *last_seen);
+
+    let mut evicted = 0;
+    for (session_key, _) in eviction_candidates.into_iter().take(overflow) {
+        if rate_limiter.remove(&session_key).is_some() {
+            evicted += 1;
+        }
+    }
+
+    evicted
+}
 
 // ─── Gateway ─────────────────────────────────────────────────────────────────
 
@@ -44,6 +75,8 @@ pub struct Gateway {
     recent_ids: Mutex<LruCache<String, ()>>,
     /// Per-chat sliding-window rate limiter: chat_id → list of request timestamps.
     rate_limiter: DashMap<String, Vec<Instant>>,
+    /// HTTP requests prevalidated before entering the gateway queue.
+    prevalidated_requests: DashMap<String, Instant>,
 }
 
 impl Gateway {
@@ -70,6 +103,7 @@ impl Gateway {
                     .expect("message cache capacity must be non-zero"),
             )),
             rate_limiter: DashMap::new(),
+            prevalidated_requests: DashMap::new(),
         })
     }
 
@@ -77,7 +111,7 @@ impl Gateway {
     ///
     /// Returns when all channels have closed AND all in-flight messages have
     /// been processed (no orphaned tasks).
-    pub async fn run(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub async fn run(self: &Arc<Self>, shutdown: CancellationToken) -> anyhow::Result<()> {
         let (tx, mut rx) = mpsc::channel::<InboundMessage>(GATEWAY_MESSAGE_QUEUE_CAPACITY);
 
         // Spawn all channel listeners
@@ -93,12 +127,16 @@ impl Gateway {
 
         // Monitor queue depth periodically
         let tx_monitor = tx.clone();
+        let shutdown_monitor = shutdown.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                 GATEWAY_QUEUE_MONITOR_INTERVAL_SECS,
             ));
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = shutdown_monitor.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
                 let capacity = tx_monitor.capacity();
                 if capacity < GATEWAY_QUEUE_PRESSURE_MIN_REMAINING_CAPACITY {
                     tracing::warn!(
@@ -114,17 +152,45 @@ impl Gateway {
 
         // Periodic GC for chat_locks and rate_limiter (every 60s instead of per-message)
         let gw_gc = self.clone();
+        let shutdown_gc = shutdown.clone();
         tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(GATEWAY_GC_INTERVAL_SECS));
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = shutdown_gc.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
                 // Remove chat locks with no active holders
                 gw_gc.chat_locks.retain(|_, v| Arc::strong_count(v) > 1);
                 // Remove empty rate limiter entries (stale sessions)
                 gw_gc
                     .rate_limiter
                     .retain(|_, timestamps| !timestamps.is_empty());
+                let now = Instant::now();
+                let prevalidated_cutoff = now
+                    .checked_sub(std::time::Duration::from_secs(
+                        PREVALIDATED_REQUEST_TTL_SECS,
+                    ))
+                    .unwrap_or(now);
+                gw_gc
+                    .prevalidated_requests
+                    .retain(|_, validated_at| *validated_at >= prevalidated_cutoff);
+                // Safety cap: evict the least-recently-used sessions instead of
+                // clearing all rate-limit state, which would let new keys reset
+                // already-limited sessions.
+                let evicted = evict_oldest_rate_limiter_entries(
+                    &gw_gc.rate_limiter,
+                    RATE_LIMITER_MAX_ENTRIES,
+                );
+                if evicted > 0 {
+                    tracing::warn!(
+                        evicted,
+                        remaining = gw_gc.rate_limiter.len(),
+                        limit = RATE_LIMITER_MAX_ENTRIES,
+                        "rate_limiter evicted oldest entries due to excessive sessions / 速率限制器条目过多，已淘汰最久未使用的会话"
+                    );
+                }
             }
         });
 
@@ -136,23 +202,35 @@ impl Gateway {
         // Track all spawned process_message tasks
         let mut tasks = JoinSet::new();
 
-        // Main message loop
-        while let Some(msg) = rx.recv().await {
-            // Dedup by message_id
-            if !msg.message_id.is_empty() {
-                let mut recent = self.recent_ids.lock().await;
-                if recent.get(&msg.message_id).is_some() {
-                    tracing::debug!(msg_id = %msg.message_id, "gateway: duplicate, skipping");
-                    continue;
+        // Main message loop — stop accepting new messages on shutdown signal
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    tracing::info!("gateway: shutdown signal received, stopping message intake / 网关: 收到关闭信号，停止接收新消息");
+                    break;
                 }
-                recent.put(msg.message_id.clone(), ());
-            }
+                msg = rx.recv() => {
+                    let Some(msg) = msg else { break };
 
-            // Spawn a task for each message, tracked by JoinSet
-            let gw = self.clone();
-            tasks.spawn(async move {
-                gw.process_message(msg).await;
-            });
+                    // Dedup by message_id
+                    if !msg.message_id.is_empty() {
+                        let mut recent = self.recent_ids.lock().await;
+                        if recent.get(&msg.message_id).is_some() {
+                            self.forget_prevalidated_message(&msg.message_id);
+                            tracing::debug!(msg_id = %msg.message_id, "gateway: duplicate, skipping");
+                            continue;
+                        }
+                        recent.put(msg.message_id.clone(), ());
+                    }
+
+                    // Spawn a task for each message, tracked by JoinSet
+                    let gw = self.clone();
+                    tasks.spawn(async move {
+                        gw.process_message(msg).await;
+                    });
+                }
+            }
         }
 
         // Wait for ALL in-flight message tasks to complete before returning.
@@ -184,6 +262,101 @@ impl Gateway {
         self.channels.get(name)
     }
 
+    fn validate_message_length(&self, msg: &InboundMessage) -> Result<(), RequestValidationError> {
+        let max_len = self.config.limits.max_message_length as usize;
+        if max_len == 0 {
+            return Ok(());
+        }
+
+        let text = msg.content.to_text();
+        if text.len() > max_len {
+            return Err(RequestValidationError::MessageTooLong {
+                len: text.len(),
+                max: max_len,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn acquire_rate_limit_slot(&self, session_key: &str) -> Result<(), RequestValidationError> {
+        let max_rpm = self.config.limits.max_requests_per_minute;
+        if max_rpm == 0 {
+            return Ok(());
+        }
+
+        let now = Instant::now();
+        let window = std::time::Duration::from_secs(GATEWAY_RATE_LIMIT_WINDOW_SECS);
+        let mut entry = self
+            .rate_limiter
+            .entry(session_key.to_string())
+            .or_default();
+        entry.retain(|t| now.duration_since(*t) < window);
+        if entry.len() >= max_rpm as usize {
+            tracing::warn!(
+                session_key = %session_key,
+                limit = max_rpm,
+                "rate limit exceeded / 超出速率限制"
+            );
+            return Err(RequestValidationError::RateLimited);
+        }
+        entry.push(now);
+        Ok(())
+    }
+
+    fn validate_request(
+        &self,
+        msg: &InboundMessage,
+        session_key: &str,
+    ) -> Result<(), RequestValidationError> {
+        self.acquire_rate_limit_slot(session_key)?;
+        self.validate_message_length(msg)
+    }
+
+    fn request_error_reply(
+        msg: &InboundMessage,
+        error: &RequestValidationError,
+    ) -> OutboundMessage {
+        match error {
+            RequestValidationError::RateLimited => {
+                OutboundMessage::error(msg, "请求过于频繁，请稍后再试")
+            }
+            RequestValidationError::MessageTooLong { len, max } => OutboundMessage::error(
+                msg,
+                &format!("消息过长（{} 字符），最大允许 {} 字符", len, max),
+            ),
+        }
+    }
+
+    fn take_prevalidated_message(&self, message_id: &str) -> bool {
+        if message_id.is_empty() {
+            return false;
+        }
+
+        self.prevalidated_requests.remove(message_id).is_some()
+    }
+
+    pub fn prevalidate_http_request(
+        &self,
+        msg: &InboundMessage,
+    ) -> Result<(), RequestValidationError> {
+        let session_key = self.session_key(msg);
+        self.validate_request(msg, &session_key)?;
+        if !msg.message_id.is_empty() {
+            self.prevalidated_requests
+                .insert(msg.message_id.clone(), Instant::now());
+        }
+        Ok(())
+    }
+
+    pub fn forget_prevalidated_message(&self, message_id: &str) {
+        if message_id.is_empty() {
+            return;
+        }
+
+        self.prevalidated_requests.remove(message_id);
+    }
+
     async fn process_message(&self, msg: InboundMessage) {
         // Assign trace_id if not already set
         let mut msg = msg;
@@ -197,52 +370,14 @@ impl Gateway {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let session_key = self.session_key(&msg);
+        let prevalidated = self.take_prevalidated_message(&msg.message_id);
 
-        // Rate limiting: sliding window per session_key
-        let max_rpm = self.config.limits.max_requests_per_minute;
-        if max_rpm > 0 {
-            let now = Instant::now();
-            let window = std::time::Duration::from_secs(GATEWAY_RATE_LIMIT_WINDOW_SECS);
-            let mut entry = self.rate_limiter.entry(session_key.clone()).or_default();
-            // Prune timestamps outside the window
-            entry.retain(|t| now.duration_since(*t) < window);
-            if entry.len() >= max_rpm as usize {
-                tracing::warn!(
-                    session_key = %session_key,
-                    limit = max_rpm,
-                    "rate limit exceeded / 超出速率限制"
-                );
-                let reply = OutboundMessage::error(&msg, "请求过于频繁，请稍后再试");
-                if let Some(ch) = self.find_channel(&msg.channel) {
-                    let _ = ch.send_message(reply).await;
-                }
-                return;
+        if !prevalidated && let Err(error) = self.validate_request(&msg, &session_key) {
+            let reply = Self::request_error_reply(&msg, &error);
+            if let Some(ch) = self.find_channel(&msg.channel) {
+                let _ = ch.send_message(reply).await;
             }
-            entry.push(now);
-            // No per-request GC — idle entries are bounded by max_rpm timestamps
-            // and self-clean on next access via the retain() above.
-        }
-
-        // Message length validation
-        let max_len = self.config.limits.max_message_length as usize;
-        if max_len > 0 {
-            let text = msg.content.to_text();
-            if text.len() > max_len {
-                tracing::warn!(
-                    session_key = %session_key,
-                    len = text.len(),
-                    max = max_len,
-                    "message too long, rejecting / 消息过长，已拒绝"
-                );
-                let reply = OutboundMessage::error(
-                    &msg,
-                    &format!("消息过长（{} 字符），最大允许 {} 字符", text.len(), max_len),
-                );
-                if let Some(ch) = self.find_channel(&msg.channel) {
-                    let _ = ch.send_message(reply).await;
-                }
-                return;
-            }
+            return;
         }
 
         // Per-chat lock: serialise processing within the same conversation
@@ -252,6 +387,11 @@ impl Gateway {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _guard = lock.lock().await;
+
+        // Track active sessions for metrics
+        self.metrics
+            .active_sessions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // 0. Acknowledge receipt (fire-and-forget reaction)
         if let Some(ch) = self.find_channel(&msg.channel)
@@ -296,6 +436,144 @@ impl Gateway {
             tracing::warn!(channel = %msg.channel, "no matching channel for reply / 未找到匹配的回复频道");
         }
 
+        // Decrement active sessions before releasing the lock
+        self.metrics
+            .active_sessions
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
         drop(_guard);
+    }
+
+    /// Streaming variant of process_message — returns a receiver of text deltas.
+    ///
+    /// Performs the same dedup, rate-limit, per-chat lock, history, and
+    /// persistence steps as `process_message`, but calls
+    /// `agent.handle_streaming()` and feeds deltas to the returned channel.
+    pub async fn process_message_streaming(
+        &self,
+        msg: InboundMessage,
+        buffer_size: usize,
+    ) -> Result<mpsc::Receiver<String>, RequestValidationError> {
+        let mut msg = msg;
+        if msg.trace_id.is_empty() {
+            msg.trace_id = uuid::Uuid::new_v4().to_string();
+        }
+
+        if !msg.message_id.is_empty() {
+            let mut recent = self.recent_ids.lock().await;
+            if recent.get(&msg.message_id).is_some() {
+                self.forget_prevalidated_message(&msg.message_id);
+                tracing::debug!(msg_id = %msg.message_id, "gateway: duplicate streaming request, skipping");
+                let (_delta_tx, delta_rx) = mpsc::channel::<String>(buffer_size.max(1));
+                return Ok(delta_rx);
+            }
+            recent.put(msg.message_id.clone(), ());
+        }
+
+        // Metrics
+        self.metrics
+            .total_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let session_key = self.session_key(&msg);
+
+        let prevalidated = self.take_prevalidated_message(&msg.message_id);
+        if !prevalidated {
+            self.validate_request(&msg, &session_key)?;
+        }
+
+        // Per-chat lock — acquired inside the spawned task to serialise processing
+        let lock = self
+            .chat_locks
+            .entry(session_key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+
+        // Create delta channel
+        let (delta_tx, delta_rx) = mpsc::channel::<String>(buffer_size);
+
+        // Spawn agent streaming task — acquires per-chat lock, loads history, runs agent
+        let agent = self.agent.clone();
+        let memory = self.memory.clone();
+        let history_limit = self.config.memory.history_limit as usize;
+        let metrics = self.metrics.clone();
+        let channels = self.channels.clone();
+        let channel_name = msg.channel.clone();
+        tokio::spawn(async move {
+            let _guard = lock.lock().await;
+
+            metrics
+                .active_sessions
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            // Acknowledge
+            if let Some(ch) = channels.get(&channel_name)
+                && let Err(e) = ch.acknowledge(&msg).await
+            {
+                tracing::debug!(error = %e, "acknowledge failed (non-critical) / 确认失败（非关键）");
+            }
+
+            // Load history
+            let history = memory
+                .get_history(&session_key, history_limit)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!(error = %e, "failed to load history / 加载历史记录失败");
+                    vec![]
+                });
+
+            let (_, persist_messages) = agent.handle_streaming(&msg, &history, delta_tx).await;
+
+            if !persist_messages.is_empty()
+                && let Err(e) = memory
+                    .save_conversation(&session_key, &persist_messages)
+                    .await
+            {
+                tracing::error!(error = %e, "failed to save streaming conversation / 保存流式对话失败");
+            }
+
+            metrics
+                .active_sessions
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        Ok(delta_rx)
+    }
+}
+
+/// Errors that can occur when validating an inbound request through the Gateway.
+#[derive(Debug)]
+pub enum RequestValidationError {
+    RateLimited,
+    MessageTooLong { len: usize, max: usize },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_evict_oldest_rate_limiter_entries_keeps_newest_sessions() {
+        let rate_limiter = DashMap::new();
+        let now = Instant::now();
+        rate_limiter.insert(
+            "session-old".to_string(),
+            vec![now.checked_sub(std::time::Duration::from_secs(30)).unwrap()],
+        );
+        rate_limiter.insert(
+            "session-mid".to_string(),
+            vec![now.checked_sub(std::time::Duration::from_secs(20)).unwrap()],
+        );
+        rate_limiter.insert(
+            "session-new".to_string(),
+            vec![now.checked_sub(std::time::Duration::from_secs(10)).unwrap()],
+        );
+
+        let evicted = evict_oldest_rate_limiter_entries(&rate_limiter, 2);
+
+        assert_eq!(evicted, 1);
+        assert!(!rate_limiter.contains_key("session-old"));
+        assert!(rate_limiter.contains_key("session-mid"));
+        assert!(rate_limiter.contains_key("session-new"));
     }
 }

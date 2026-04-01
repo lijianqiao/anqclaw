@@ -6,8 +6,8 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::Result;
 
@@ -456,7 +456,9 @@ async fn test_skill_summary_path_can_be_read_via_file_read() {
     assert_eq!(reply.content, "Skill loaded via file_read.");
     assert!(persist.iter().any(|message| {
         message.role == Role::Tool
-            && message.content.contains("Use pandas for spreadsheet inspection.")
+            && message
+                .content
+                .contains("Use pandas for spreadsheet inspection.")
     }));
 
     let llm_messages = mock_llm.last_messages();

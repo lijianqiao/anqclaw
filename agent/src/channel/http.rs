@@ -11,8 +11,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use axum::{
@@ -22,30 +21,19 @@ use axum::{
     response::sse::{Event, Sse},
     routing::{get, post},
 };
-use dashmap::DashMap;
 use futures_util::StreamExt;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::agent::AgentCore;
-use crate::config::{AppConfig, HttpChannelSection};
-use crate::memory::MemoryStore;
+use crate::config::HttpChannelSection;
+use crate::gateway::{Gateway, RequestValidationError};
 use crate::metrics::Metrics;
-use crate::session::build_session_key;
 use crate::types::{ImageData, InboundMessage, MessageContent, OutboundMessage};
 
-const HTTP_RATE_LIMIT_WINDOW_SECS: u64 = 60;
-const DEFAULT_HTTP_MAX_REQUESTS_PER_MINUTE: u32 = 20;
 const HTTP_REPLY_TIMEOUT_SECS: u64 = 300;
 const HTTP_STREAM_BUFFER_SIZE: usize = 32;
-
-#[derive(Clone)]
-struct StreamingDeps {
-    agent: Arc<AgentCore>,
-    memory: Arc<MemoryStore>,
-}
 
 // ─── HTTP channel ────────────────────────────────────────────────────────────
 
@@ -53,30 +41,23 @@ pub struct HttpChannel {
     config: HttpChannelSection,
     /// Pending responses: message_id → oneshot sender.
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<OutboundMessage>>>>,
-    /// For streaming endpoint: direct agent access.
-    streaming: Option<StreamingDeps>,
-    app_config: Option<Arc<AppConfig>>,
+    /// Gateway reference injected after construction to break cyclic wiring.
+    gateway: OnceLock<Arc<Gateway>>,
     metrics: Option<Arc<Metrics>>,
 }
 
 impl HttpChannel {
-    pub fn new(
-        config: &HttpChannelSection,
-        agent: Option<Arc<AgentCore>>,
-        memory: Option<Arc<MemoryStore>>,
-        app_config: Option<Arc<AppConfig>>,
-        metrics: Option<Arc<Metrics>>,
-    ) -> Self {
-        let streaming = agent
-            .zip(memory)
-            .map(|(agent, memory)| StreamingDeps { agent, memory });
+    pub fn new(config: &HttpChannelSection, metrics: Option<Arc<Metrics>>) -> Self {
         Self {
             config: config.clone(),
             pending: Arc::new(Mutex::new(HashMap::new())),
-            streaming,
-            app_config,
+            gateway: OnceLock::new(),
             metrics,
         }
+    }
+
+    pub fn set_gateway(&self, gateway: Arc<Gateway>) {
+        let _ = self.gateway.set(gateway);
     }
 }
 
@@ -97,28 +78,10 @@ impl super::Channel for HttpChannel {
                         Some(token.to_string())
                     }
                 },
-                rate_limiter: Arc::new(DashMap::new()),
-                streaming: self.streaming.clone(),
-                app_config: self.app_config.clone(),
+                gateway: self.gateway.get().cloned(),
                 metrics: self.metrics.clone(),
             };
             let state = Arc::new(state);
-
-            let rate_limiter = state.rate_limiter.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                    HTTP_RATE_LIMIT_WINDOW_SECS,
-                ));
-                let window = std::time::Duration::from_secs(HTTP_RATE_LIMIT_WINDOW_SECS);
-                loop {
-                    interval.tick().await;
-                    let now = Instant::now();
-                    rate_limiter.retain(|_, timestamps| {
-                        timestamps.retain(|timestamp| now.duration_since(*timestamp) < window);
-                        !timestamps.is_empty()
-                    });
-                }
-            });
 
             let app = Router::new()
                 .route("/v1/chat", post(handle_chat))
@@ -177,18 +140,9 @@ struct HttpState {
     tx: mpsc::Sender<InboundMessage>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<OutboundMessage>>>>,
     bearer_token: Option<String>,
-    /// Per-session-key sliding-window rate limiter.
-    rate_limiter: Arc<DashMap<String, Vec<Instant>>>,
-    /// For streaming endpoint.
-    streaming: Option<StreamingDeps>,
-    app_config: Option<Arc<AppConfig>>,
+    /// Gateway reference for streaming endpoint.
+    gateway: Option<Arc<Gateway>>,
     metrics: Option<Arc<Metrics>>,
-}
-
-impl HttpState {
-    fn app_config(&self) -> Option<&AppConfig> {
-        self.app_config.as_deref()
-    }
 }
 
 /// Request body for `POST /v1/chat`.
@@ -268,50 +222,27 @@ fn normalize_sender_id(sender_id: &str) -> String {
     }
 }
 
-fn resolve_session_key(state: &HttpState, chat_id: &str, sender_id: &str) -> String {
-    build_session_key(
-        state
-            .app_config()
-            .map(|config| config.memory.session_key_strategy.as_str())
-            .unwrap_or("chat"),
-        chat_id,
-        sender_id,
-    )
-}
-
-fn rate_limit_budget(state: &HttpState) -> u32 {
-    state
-        .app_config()
-        .map(|config| config.limits.max_requests_per_minute)
-        .unwrap_or(DEFAULT_HTTP_MAX_REQUESTS_PER_MINUTE)
-}
-
-fn enforce_rate_limit(
-    state: &HttpState,
-    chat_id: &str,
-    sender_id: &str,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let max_requests = rate_limit_budget(state);
-    if max_requests == 0 {
-        return Ok(());
-    }
-
-    let session_key = resolve_session_key(state, chat_id, sender_id);
-    let now = Instant::now();
-    let window = std::time::Duration::from_secs(HTTP_RATE_LIMIT_WINDOW_SECS);
-    let mut entry = state.rate_limiter.entry(session_key).or_default();
-    entry.retain(|timestamp| now.duration_since(*timestamp) < window);
-    if entry.len() >= max_requests as usize {
-        return Err((
+fn map_request_validation_error(
+    error: RequestValidationError,
+) -> (StatusCode, Json<ErrorResponse>) {
+    match error {
+        RequestValidationError::RateLimited => (
             StatusCode::TOO_MANY_REQUESTS,
             Json(ErrorResponse {
                 error: "rate limit exceeded, please try again later / 超过速率限制，请稍后再试"
                     .into(),
             }),
-        ));
+        ),
+        RequestValidationError::MessageTooLong { len, max } => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "message too long ({} chars), max {} chars / 消息过长（{} 字符），最大允许 {} 字符",
+                    len, max, len, max
+                ),
+            }),
+        ),
     }
-    entry.push(now);
-    Ok(())
 }
 
 /// RAII guard that removes the pending entry on drop, preventing leaks when
@@ -369,9 +300,24 @@ async fn handle_chat(
     };
     let sender_id = normalize_sender_id(&req.sender_id);
 
-    enforce_rate_limit(&state, &chat_id, &sender_id)?;
-
     let message_id = uuid::Uuid::new_v4().to_string();
+
+    let inbound = InboundMessage {
+        channel: "http".into(),
+        chat_id: chat_id.clone(),
+        sender_id,
+        message_id: message_id.clone(),
+        content: MessageContent::Text(req.message),
+        timestamp: chrono::Utc::now().timestamp(),
+        trace_id: String::new(),
+        images: vec![],
+    };
+
+    if let Some(gateway) = state.gateway.as_ref() {
+        gateway
+            .prevalidate_http_request(&inbound)
+            .map_err(map_request_validation_error)?;
+    }
 
     // Register pending oneshot with a drop guard for cleanup on cancellation
     let (resp_tx, resp_rx) = oneshot::channel();
@@ -384,20 +330,11 @@ async fn handle_chat(
         message_id: message_id.clone(),
     };
 
-    // Build inbound message
-    let inbound = InboundMessage {
-        channel: "http".into(),
-        chat_id: chat_id.clone(),
-        sender_id,
-        message_id: message_id.clone(),
-        content: MessageContent::Text(req.message),
-        timestamp: chrono::Utc::now().timestamp(),
-        trace_id: String::new(),
-        images: vec![],
-    };
-
     // Send to gateway
     if state.tx.send(inbound).await.is_err() {
+        if let Some(gateway) = state.gateway.as_ref() {
+            gateway.forget_prevalidated_message(&message_id);
+        }
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -473,17 +410,7 @@ async fn handle_chat_stream(
     };
     let sender_id = normalize_sender_id(&req.sender_id);
 
-    enforce_rate_limit(&state, &chat_id, &sender_id)?;
-
-    let Some(streaming) = state.streaming.clone() else {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            Json(ErrorResponse {
-                error: "streaming not configured / 流式传输未配置".into(),
-            }),
-        ));
-    };
-    let Some(app_config) = state.app_config.clone() else {
+    let Some(gateway) = state.gateway.clone() else {
         return Err((
             StatusCode::NOT_IMPLEMENTED,
             Json(ErrorResponse {
@@ -503,30 +430,13 @@ async fn handle_chat_stream(
         images: vec![],
     };
 
-    // Load history
-    let history = streaming
-        .memory
-        .get_history(&chat_id, app_config.memory.history_limit as usize)
+    let delta_rx = match gateway
+        .process_message_streaming(inbound, HTTP_STREAM_BUFFER_SIZE)
         .await
-        .unwrap_or_default();
-
-    // Create streaming channel
-    let (delta_tx, delta_rx) = mpsc::channel::<String>(HTTP_STREAM_BUFFER_SIZE);
-
-    // Spawn agent task
-    let memory_clone = streaming.memory.clone();
-    let chat_id_clone = chat_id.clone();
-    let agent = streaming.agent.clone();
-    tokio::spawn(async move {
-        let (_, persist_messages) = agent.handle_streaming(&inbound, &history, delta_tx).await;
-        if !persist_messages.is_empty()
-            && let Err(e) = memory_clone
-                .save_conversation(&chat_id_clone, &persist_messages)
-                .await
-        {
-            tracing::error!(error = %e, "failed to save streaming conversation / 保存流式对话失败");
-        }
-    });
+    {
+        Ok(rx) => rx,
+        Err(error) => return Err(map_request_validation_error(error)),
+    };
 
     // Convert to SSE stream
     let stream =
@@ -666,8 +576,6 @@ async fn handle_chat_multipart(
     }
     sender_id = normalize_sender_id(&sender_id);
 
-    enforce_rate_limit(&state, &chat_id, &sender_id)?;
-
     // Handle file: extract text content from text-like files
     if let Some((ref filename, ref bytes)) = file_content {
         let text_extensions = [
@@ -731,8 +639,17 @@ async fn handle_chat_multipart(
         images,
     };
 
+    if let Some(gateway) = state.gateway.as_ref() {
+        gateway
+            .prevalidate_http_request(&inbound)
+            .map_err(map_request_validation_error)?;
+    }
+
     // Send to gateway
     if state.tx.send(inbound).await.is_err() {
+        if let Some(gateway) = state.gateway.as_ref() {
+            gateway.forget_prevalidated_message(&message_id);
+        }
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -777,36 +694,6 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use tower::ServiceExt;
 
-    fn test_app_config(session_key_strategy: &str, max_requests_per_minute: u32) -> Arc<AppConfig> {
-        let toml_str = format!(
-            r#"
-[app]
-name = "test"
-workspace = "./test_workspace_nonexistent"
-log_level = "info"
-
-[feishu]
-app_id = "test"
-app_secret = "test"
-
-[llm]
-provider = "anthropic"
-model = "test"
-api_key = "test"
-
-[memory]
-session_key_strategy = "{session_key_strategy}"
-
-[limits]
-max_requests_per_minute = {max_requests_per_minute}
-
-[agent]
-max_tool_rounds = 3
-"#
-        );
-        Arc::new(AppConfig::load_from_str(&toml_str).unwrap())
-    }
-
     #[test]
     fn test_constant_time_eq_matches_equal_strings() {
         assert!(constant_time_eq("secret123", "secret123"));
@@ -835,47 +722,9 @@ max_tool_rounds = 3
             tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
             bearer_token: bearer_token.map(|s| s.to_string()),
-            rate_limiter: Arc::new(DashMap::new()),
-            streaming: None,
-            app_config: Some(test_app_config(
-                "chat",
-                DEFAULT_HTTP_MAX_REQUESTS_PER_MINUTE,
-            )),
+            gateway: None,
             metrics: None,
         })
-    }
-
-    #[test]
-    fn test_resolve_session_key_matches_chat_user_strategy() {
-        let state = HttpState {
-            tx: mpsc::channel(1).0,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            bearer_token: None,
-            rate_limiter: Arc::new(DashMap::new()),
-            streaming: None,
-            app_config: Some(test_app_config("chat_user", 20)),
-            metrics: None,
-        };
-
-        assert_eq!(
-            resolve_session_key(&state, "chat_a", "user_a"),
-            "chat_a::user_a"
-        );
-    }
-
-    #[test]
-    fn test_resolve_session_key_matches_user_strategy() {
-        let state = HttpState {
-            tx: mpsc::channel(1).0,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            bearer_token: None,
-            rate_limiter: Arc::new(DashMap::new()),
-            streaming: None,
-            app_config: Some(test_app_config("user", 20)),
-            metrics: None,
-        };
-
-        assert_eq!(resolve_session_key(&state, "chat_a", "user_a"), "user_a");
     }
 
     fn test_router(state: Arc<HttpState>) -> Router {
@@ -954,12 +803,7 @@ max_tool_rounds = 3
             tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
             bearer_token: Some("secret123".to_string()),
-            rate_limiter: Arc::new(DashMap::new()),
-            streaming: None,
-            app_config: Some(test_app_config(
-                "chat",
-                DEFAULT_HTTP_MAX_REQUESTS_PER_MINUTE,
-            )),
+            gateway: None,
             metrics: None,
         });
         let app = test_router(state);
@@ -982,30 +826,5 @@ max_tool_rounds = 3
         let resp = app.oneshot(req).await.unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
-    }
-
-    #[tokio::test]
-    async fn test_rate_limiting() {
-        let state = test_state(None);
-        {
-            let now = Instant::now();
-            let timestamps: Vec<Instant> = (0..DEFAULT_HTTP_MAX_REQUESTS_PER_MINUTE)
-                .map(|_| now)
-                .collect();
-            state
-                .rate_limiter
-                .insert("chat_rate_limit".to_string(), timestamps);
-        }
-
-        let app = test_router(state);
-        let req = Request::post("/v1/chat")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"message":"hello","chat_id":"chat_rate_limit","sender_id":"http_user"}"#,
-            ))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-
-        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }

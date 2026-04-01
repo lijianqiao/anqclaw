@@ -7,10 +7,11 @@ pub mod context;
 pub mod probe;
 pub mod prompt;
 pub mod redact;
+pub(crate) mod skill_match;
 mod token_budget;
+pub(crate) mod util;
 
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -45,303 +46,15 @@ pub struct AgentCore {
 }
 
 #[derive(Clone)]
-struct WorkspaceExtensionsCache {
-    cached_at: Instant,
-    extensions: HashSet<String>,
+pub(super) struct WorkspaceExtensionsCache {
+    pub(super) cached_at: Instant,
+    pub(super) extensions: HashSet<String>,
 }
 
-#[derive(Default)]
-struct SkillCandidateContext {
-    user_text: String,
-    history_text: String,
-    combined_text: String,
-    recent_file_tokens: HashSet<String>,
-    workspace_extensions: HashSet<String>,
-}
-
-#[derive(Clone)]
-struct SkillCandidateMatch {
-    skill: SkillMeta,
-    score: i32,
-    description_match: bool,
-    extension_match: bool,
-}
-
-#[derive(Clone, Copy, Default)]
-struct MatchSignalScore {
-    score: i32,
-    matched: bool,
-}
-
-const DESCRIPTION_STOPWORDS: &[&str] = &[
-    "the",
-    "and",
-    "when",
-    "with",
-    "this",
-    "that",
-    "from",
-    "into",
-    "your",
-    "their",
-    "then",
-    "than",
-    "use",
-    "using",
-    "used",
-    "skill",
-    "time",
-    "any",
-    "want",
-    "wants",
-    "user",
-    "users",
-    "file",
-    "files",
-    "primary",
-    "input",
-    "output",
-    "trigger",
-    "especially",
-    "existing",
-    "these",
-    "those",
-];
-
-const RECENT_HISTORY_MESSAGE_LIMIT: usize = 8;
-const WORKSPACE_EXTENSION_SCAN_LIMIT: usize = 256;
-const WORKSPACE_EXTENSIONS_CACHE_TTL: Duration = Duration::from_secs(60);
+pub(super) const WORKSPACE_EXTENSION_SCAN_LIMIT: usize = 256;
+pub(super) const WORKSPACE_EXTENSIONS_CACHE_TTL: Duration = Duration::from_secs(60);
 
 impl AgentCore {
-    #[cfg(test)]
-    fn select_skill_candidates(&self, user_text: &str, history: &[ChatMessage]) -> Vec<SkillMeta> {
-        self.select_skill_candidate_matches(user_text, history)
-            .into_iter()
-            .map(|candidate| candidate.skill)
-            .collect()
-    }
-
-    fn select_skill_candidate_matches(
-        &self,
-        user_text: &str,
-        history: &[ChatMessage],
-    ) -> Vec<SkillCandidateMatch> {
-        let Some(registry) = self.skill_registry.as_ref() else {
-            return Vec::new();
-        };
-
-        let max_active = self.config.skills.max_active_skills as usize;
-        if max_active == 0 {
-            return Vec::new();
-        }
-
-        let context = self.build_skill_candidate_context(user_text, history);
-        let mut scored: Vec<SkillCandidateMatch> = registry
-            .list()
-            .into_iter()
-            .filter_map(|skill| Self::score_skill_candidate(&skill, &context))
-            .collect();
-
-        scored.sort_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| right.skill.priority.cmp(&left.skill.priority))
-                .then_with(|| left.skill.name.cmp(&right.skill.name))
-        });
-
-        scored.into_iter().take(max_active).collect()
-    }
-
-    fn build_skill_candidate_context(
-        &self,
-        user_text: &str,
-        history: &[ChatMessage],
-    ) -> SkillCandidateContext {
-        let user_text = user_text.to_lowercase();
-        let history_messages: Vec<String> = history
-            .iter()
-            .rev()
-            .filter(|message| message.role != crate::types::Role::System)
-            .take(RECENT_HISTORY_MESSAGE_LIMIT)
-            .map(|message| message.content.to_lowercase())
-            .collect();
-        let history_text = history_messages.join("\n");
-        let combined_text = if history_text.is_empty() {
-            user_text.clone()
-        } else {
-            format!("{user_text}\n{history_text}")
-        };
-
-        SkillCandidateContext {
-            recent_file_tokens: extract_file_like_tokens(&combined_text),
-            workspace_extensions: self.cached_workspace_extensions(),
-            user_text,
-            history_text,
-            combined_text,
-        }
-    }
-
-    fn cached_workspace_extensions(&self) -> HashSet<String> {
-        if let Ok(cache_guard) = self.workspace_extensions_cache.read()
-            && let Some(cache) = cache_guard.as_ref()
-            && cache.cached_at.elapsed() < WORKSPACE_EXTENSIONS_CACHE_TTL
-        {
-            return cache.extensions.clone();
-        }
-
-        let extensions = collect_workspace_extensions(
-            Path::new(&self.config.app.workspace),
-            WORKSPACE_EXTENSION_SCAN_LIMIT,
-        );
-        let refreshed_cache = WorkspaceExtensionsCache {
-            cached_at: Instant::now(),
-            extensions: extensions.clone(),
-        };
-
-        match self.workspace_extensions_cache.write() {
-            Ok(mut cache_guard) => {
-                *cache_guard = Some(refreshed_cache);
-            }
-            Err(poisoned) => {
-                *poisoned.into_inner() = Some(refreshed_cache);
-            }
-        }
-
-        extensions
-    }
-
-    fn score_skill_candidate(
-        skill: &SkillMeta,
-        context: &SkillCandidateContext,
-    ) -> Option<SkillCandidateMatch> {
-        if skill.disable_model_invocation {
-            return None;
-        }
-
-        let mut score = skill.priority;
-        let mut matched = false;
-        let skill_name = skill.normalized_name();
-        let mut description_match = false;
-        let mut extension_match = false;
-
-        if !skill_name.is_empty() {
-            if context.user_text.contains(skill_name) {
-                score += 120;
-                matched = true;
-            }
-            if context.history_text.contains(skill_name) {
-                score += 60;
-                matched = true;
-            }
-        }
-
-        let description_signal = Self::score_description_match(skill, context);
-        if description_signal.matched {
-            score += description_signal.score;
-            matched = true;
-            description_match = true;
-        }
-
-        for keyword in skill.keyword_terms() {
-            if context.user_text.contains(keyword.as_str()) {
-                score += 80;
-                matched = true;
-            }
-            if context.history_text.contains(keyword.as_str()) {
-                score += 40;
-                matched = true;
-            }
-        }
-
-        for trigger in skill.trigger_terms() {
-            if context.user_text.contains(trigger.as_str()) {
-                score += 40;
-                matched = true;
-            }
-            if context.history_text.contains(trigger.as_str()) {
-                score += 20;
-                matched = true;
-            }
-        }
-
-        let extension_signal = Self::score_extension_match(skill, context);
-        if extension_signal.matched {
-            score += extension_signal.score;
-            matched = true;
-            extension_match = true;
-        }
-
-        matched.then_some(SkillCandidateMatch {
-            skill: skill.clone(),
-            score,
-            description_match,
-            extension_match,
-        })
-    }
-
-    fn score_description_match(
-        skill: &SkillMeta,
-        context: &SkillCandidateContext,
-    ) -> MatchSignalScore {
-        let description = skill.normalized_description();
-        if description.is_empty() {
-            return MatchSignalScore::default();
-        }
-
-        let mut score = 0;
-        if context.user_text.contains(description) {
-            score += 50;
-        } else {
-            let terms = extract_description_terms(description);
-            if terms.iter().any(|term| context.user_text.contains(term)) {
-                score += 50;
-            }
-            if terms.iter().any(|term| context.history_text.contains(term)) {
-                score += 25;
-            }
-            return MatchSignalScore {
-                score,
-                matched: score > 0,
-            };
-        }
-
-        if context.history_text.contains(description) {
-            score += 25;
-        }
-        MatchSignalScore {
-            score,
-            matched: score > 0,
-        }
-    }
-
-    fn score_extension_match(
-        skill: &SkillMeta,
-        context: &SkillCandidateContext,
-    ) -> MatchSignalScore {
-        let mut score = 0;
-
-        for extension in skill.extension_terms() {
-            if context.combined_text.contains(extension.as_str())
-                || context
-                    .recent_file_tokens
-                    .iter()
-                    .any(|token| token.ends_with(extension.as_str()))
-            {
-                score += 90;
-            }
-
-            if context.workspace_extensions.contains(extension.as_str()) {
-                score += 15;
-            }
-        }
-
-        MatchSignalScore {
-            score,
-            matched: score > 0,
-        }
-    }
-
     fn summarize_tool_failures(results: &[crate::types::ToolResult], max_items: usize) -> String {
         let failures: Vec<String> = results
             .iter()
@@ -461,7 +174,9 @@ impl AgentCore {
     ) -> Result<(OutboundMessage, Vec<ChatMessage>)> {
         // 1. Select candidate skills and build the system prompt summary.
         let user_text = msg.content.to_text();
-        let candidate_matches = self.select_skill_candidate_matches(&user_text, history);
+        let candidate_matches = self
+            .select_skill_candidate_matches(&user_text, history)
+            .await;
         let candidate_skills: Vec<SkillMeta> = candidate_matches
             .iter()
             .map(|candidate| candidate.skill.clone())
@@ -579,6 +294,27 @@ impl AgentCore {
         let mut consecutive_errors: usize = 0;
         let max_consecutive = self.config.agent.max_consecutive_tool_errors as usize;
         for round in 0..max_rounds {
+            if let Some(tx) = stream_tx.as_ref()
+                && tx.is_closed()
+            {
+                tracing::info!(
+                    round,
+                    "stream receiver closed before starting LLM round / 流接收端已关闭，跳过新的 LLM 轮次"
+                );
+                let reply = OutboundMessage {
+                    channel: msg.channel.clone(),
+                    chat_id: msg.chat_id.clone(),
+                    reply_to: if msg.message_id.is_empty() {
+                        None
+                    } else {
+                        Some(msg.message_id.clone())
+                    },
+                    content: String::new(),
+                };
+                let persist_messages = messages[persist_start..].to_vec();
+                return Ok((reply, persist_messages));
+            }
+
             let llm_start = std::time::Instant::now();
             let response = if stream_tx.is_some() {
                 // Streaming path: use chat_stream, forward deltas
@@ -596,13 +332,33 @@ impl AgentCore {
                 let mut partial_text = String::new();
                 let mut final_resp = None;
                 let mut receiver_dropped = false;
-                while let Some(event) = rx.recv().await {
-                    match event {
-                        StreamEvent::Delta(text) => {
-                            partial_text.push_str(&text);
-                            if let Some(ref tx) = stream_tx
-                                && tx.send(text).await.is_err()
-                            {
+                loop {
+                    if let Some(tx) = stream_tx.as_ref() {
+                        tokio::select! {
+                            biased;
+                            event = rx.recv() => {
+                                let Some(event) = event else {
+                                    break;
+                                };
+                                match event {
+                                    StreamEvent::Delta(text) => {
+                                        partial_text.push_str(&text);
+                                        if tx.send(text).await.is_err() {
+                                            receiver_dropped = true;
+                                            tracing::info!(
+                                                round,
+                                                chars = partial_text.chars().count(),
+                                                "stream receiver dropped, stopping agent loop early / 流接收端已断开，提前停止 agent 循环"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    StreamEvent::Done(resp) => {
+                                        final_resp = Some(resp);
+                                    }
+                                }
+                            }
+                            _ = tx.closed() => {
                                 receiver_dropped = true;
                                 tracing::info!(
                                     round,
@@ -612,12 +368,35 @@ impl AgentCore {
                                 break;
                             }
                         }
-                        StreamEvent::Done(resp) => {
-                            final_resp = Some(resp);
+                    } else {
+                        let Some(event) = rx.recv().await else {
+                            break;
+                        };
+                        match event {
+                            StreamEvent::Delta(text) => {
+                                partial_text.push_str(&text);
+                            }
+                            StreamEvent::Done(resp) => {
+                                final_resp = Some(resp);
+                            }
                         }
                     }
                 }
                 if receiver_dropped {
+                    if partial_text.is_empty() {
+                        let reply = OutboundMessage {
+                            channel: msg.channel.clone(),
+                            chat_id: msg.chat_id.clone(),
+                            reply_to: if msg.message_id.is_empty() {
+                                None
+                            } else {
+                                Some(msg.message_id.clone())
+                            },
+                            content: String::new(),
+                        };
+                        let persist_messages = messages[persist_start..].to_vec();
+                        return Ok((reply, persist_messages));
+                    }
                     crate::types::LlmResponse {
                         text: Some(partial_text),
                         tool_calls: vec![],
@@ -657,6 +436,32 @@ impl AgentCore {
                 }
             };
             let llm_duration_ms = llm_start.elapsed().as_millis() as u64;
+
+            if let Some(tx) = stream_tx.as_ref()
+                && tx.is_closed()
+            {
+                tracing::info!(
+                    round,
+                    tool_calls = response.tool_calls.len(),
+                    "stream receiver closed before tool execution, stopping remaining work / 流接收端已关闭，停止后续工具执行"
+                );
+                let reply_text = response.text.clone().unwrap_or_default();
+                if !reply_text.is_empty() {
+                    messages.push(ChatMessage::assistant(&reply_text));
+                }
+                let reply = OutboundMessage {
+                    channel: msg.channel.clone(),
+                    chat_id: msg.chat_id.clone(),
+                    reply_to: if msg.message_id.is_empty() {
+                        None
+                    } else {
+                        Some(msg.message_id.clone())
+                    },
+                    content: reply_text,
+                };
+                let persist_messages = messages[persist_start..].to_vec();
+                return Ok((reply, persist_messages));
+            }
 
             let has_tool_calls = !response.tool_calls.is_empty();
             let has_text = response.text.is_some();
@@ -902,155 +707,6 @@ impl AgentCore {
         let reply = OutboundMessage::error(msg, &error_text);
         let persist_messages = messages[persist_start..].to_vec();
         Ok((reply, persist_messages))
-    }
-}
-
-fn extract_file_like_tokens(text: &str) -> HashSet<String> {
-    let mut current = String::new();
-    let mut tokens = HashSet::new();
-
-    for ch in text.chars() {
-        if ch.is_whitespace()
-            || matches!(
-                ch,
-                ',' | '，'
-                    | ';'
-                    | '；'
-                    | ':'
-                    | '：'
-                    | '"'
-                    | '\''
-                    | '('
-                    | ')'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | '<'
-                    | '>'
-            )
-        {
-            push_file_token(&mut current, &mut tokens);
-            continue;
-        }
-        current.push(ch);
-    }
-    push_file_token(&mut current, &mut tokens);
-
-    tokens
-}
-
-fn push_file_token(current: &mut String, tokens: &mut HashSet<String>) {
-    if current.contains('.') {
-        let token = current
-            .trim_matches(|ch: char| matches!(ch, '.' | ',' | '，' | ';' | '；' | '"' | '\''))
-            .to_lowercase();
-        if !token.is_empty() && token.contains('.') {
-            tokens.insert(token);
-        }
-    }
-    current.clear();
-}
-
-fn collect_workspace_extensions(workspace: &Path, max_files: usize) -> HashSet<String> {
-    let mut extensions = HashSet::new();
-    if max_files == 0 || !workspace.exists() {
-        return extensions;
-    }
-
-    let mut visited_files = 0usize;
-    let mut stack = vec![workspace.to_path_buf()];
-
-    while let Some(dir) = stack.pop() {
-        if visited_files >= max_files {
-            break;
-        }
-
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-
-        for entry in entries.flatten() {
-            if visited_files >= max_files {
-                break;
-            }
-
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-
-            visited_files += 1;
-            if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
-                let extension = extension.trim().to_lowercase();
-                if !extension.is_empty() {
-                    extensions.insert(format!(".{extension}"));
-                }
-            }
-        }
-    }
-
-    extensions
-}
-
-fn extract_description_terms(description: &str) -> HashSet<String> {
-    let mut terms = HashSet::new();
-    let mut current = String::new();
-
-    for ch in description.chars() {
-        if ch.is_alphanumeric() || ch == '.' {
-            current.push(ch);
-        } else {
-            push_description_term(&mut current, &mut terms);
-        }
-    }
-    push_description_term(&mut current, &mut terms);
-
-    terms
-}
-
-fn push_description_term(current: &mut String, terms: &mut HashSet<String>) {
-    if current.is_empty() {
-        return;
-    }
-
-    let term = current.trim().to_lowercase();
-    current.clear();
-
-    if term.is_empty() {
-        return;
-    }
-
-    if term.starts_with('.') {
-        if term.len() >= 4 {
-            terms.insert(term);
-        }
-        return;
-    }
-
-    if term.is_ascii() {
-        if term.len() >= 3 && !DESCRIPTION_STOPWORDS.contains(&term.as_str()) {
-            terms.insert(term);
-        }
-        return;
-    }
-
-    let char_count = term.chars().count();
-    if char_count >= 2 {
-        terms.insert(term.clone());
-    }
-
-    if char_count >= 4 {
-        let chars: Vec<char> = term.chars().collect();
-        for window_size in [3usize, 4usize] {
-            if char_count < window_size {
-                continue;
-            }
-            for window in chars.windows(window_size) {
-                terms.insert(window.iter().collect());
-            }
-        }
     }
 }
 
@@ -1320,9 +976,9 @@ max_tool_rounds = 3
         ));
         let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
 
-        let first = agent.cached_workspace_extensions();
+        let first = agent.cached_workspace_extensions().await;
         std::fs::write(workspace.join("second.py"), "print('hi')").unwrap();
-        let second = agent.cached_workspace_extensions();
+        let second = agent.cached_workspace_extensions().await;
 
         assert!(first.contains(".txt"));
         assert_eq!(first, second);
@@ -1396,8 +1052,42 @@ max_tool_rounds = 3
 
         let (reply, persist) = agent.handle_streaming(&test_inbound(), &[], tx).await;
 
-        assert_eq!(reply.content, "第一段");
-        assert_eq!(persist.len(), 2);
+        assert!(reply.content.is_empty());
+        assert_eq!(persist.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_skips_tool_execution_when_receiver_drops_before_done() {
+        let memory = test_memory().await;
+        let config = test_config();
+
+        let mock_llm = Arc::new(MockLlm::with_stream(vec![StreamEvent::Done(LlmResponse {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "call_1".into(),
+                name: "shell_exec".into(),
+                arguments: serde_json::json!({"command": "date"}),
+            }],
+        })]));
+
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            None,
+            vec![],
+            None,
+        ));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+
+        let (reply, persist) = agent.handle_streaming(&test_inbound(), &[], tx).await;
+
+        assert!(reply.content.is_empty());
+        assert_eq!(persist.len(), 1);
     }
 
     #[tokio::test]
@@ -1666,7 +1356,9 @@ max_tool_rounds = 10
             ChatMessage::assistant("文件 设备数据导出.xlsx 在当前工作区未找到。"),
         ];
 
-        let candidates = agent.select_skill_candidates(&msg.content.to_text(), &history);
+        let candidates = agent
+            .select_skill_candidates(&msg.content.to_text(), &history)
+            .await;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "xlsx");
 
@@ -1731,8 +1423,9 @@ max_tool_rounds = 10
         )
         .await;
 
-        let candidates =
-            agent.select_skill_candidates("Please inspect this spreadsheet for me", &[]);
+        let candidates = agent
+            .select_skill_candidates("Please inspect this spreadsheet for me", &[])
+            .await;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "xlsx");
 
@@ -1786,7 +1479,9 @@ max_tool_rounds = 10
         )
         .await;
 
-        let candidates = agent.select_skill_candidates("Please inspect this spreadsheet", &[]);
+        let candidates = agent
+            .select_skill_candidates("Please inspect this spreadsheet / 请检查这个电子表格", &[])
+            .await;
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].name, "keyword-skill");
         assert_eq!(candidates[1].name, "trigger-skill");
@@ -1841,7 +1536,9 @@ max_tool_rounds = 10
         )
         .await;
 
-        let candidates = agent.select_skill_candidates("Please inspect this spreadsheet", &[]);
+        let candidates = agent
+            .select_skill_candidates("Please inspect this spreadsheet / 请检查这个电子表格", &[])
+            .await;
         assert_eq!(candidates[0].name, "high-priority");
         assert_eq!(candidates[1].name, "low-priority");
 
@@ -1896,13 +1593,74 @@ max_tool_rounds = 10
         )
         .await;
 
-        let candidates = agent.select_skill_candidates(
-            "Please inspect report.xlsx and help with this spreadsheet",
-            &[],
-        );
+        let candidates = agent
+            .select_skill_candidates(
+                "Please inspect report.xlsx and help with this spreadsheet / 请检查 report.xlsx 并帮助处理这个电子表格",
+                &[],
+            )
+            .await;
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].name, "xlsx-skill");
         assert_eq!(candidates[1].name, "generic-description");
+
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        let _ = std::fs::remove_dir_all(&skill_dir);
+    }
+
+    #[tokio::test]
+    async fn test_select_skill_candidates_caps_extension_content_signal() {
+        let memory = test_memory().await;
+        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_extension_cap_workspace");
+        let _ = std::fs::remove_dir_all(&workspace_dir);
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::write(workspace_dir.join("report.xlsx"), "fake").unwrap();
+        let config = test_config_with_workspace(&workspace_dir);
+
+        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_extension_cap_registry");
+        let skill_registry = create_skill_registry(
+            &skill_dir,
+            &[
+                (
+                    "z-many-ext",
+                    "---\nname: z-many-ext\ndescription: many\nextensions:\n  - .xlsx\n  - .xls\n  - .csv\n  - .tsv\npriority: 10\n---\nBody",
+                ),
+                (
+                    "a-single-ext",
+                    "---\nname: a-single-ext\ndescription: single\nextensions:\n  - .xlsx\npriority: 10\n---\nBody",
+                ),
+            ],
+        );
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+        }]));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            Some(skill_registry.clone()),
+            vec![],
+            Some(&config.skills),
+        ));
+        let agent = AgentCore::new(
+            mock_llm,
+            None,
+            tools,
+            memory,
+            config,
+            None,
+            Some(skill_registry),
+        )
+        .await;
+
+        let candidates = agent
+            .select_skill_candidates("Please inspect report.xlsx and help with this spreadsheet / 请检查 report.xlsx 并帮助处理这个电子表格", &[])
+            .await;
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].name, "a-single-ext");
+        assert_eq!(candidates[1].name, "z-many-ext");
 
         let _ = std::fs::remove_dir_all(&workspace_dir);
         let _ = std::fs::remove_dir_all(&skill_dir);
@@ -1948,7 +1706,9 @@ max_tool_rounds = 10
         )
         .await;
 
-        let candidates = agent.select_skill_candidates("Please help me", &[]);
+        let candidates = agent
+            .select_skill_candidates("Please help me / 请帮助我", &[])
+            .await;
         assert!(candidates.is_empty());
 
         let _ = std::fs::remove_dir_all(&workspace_dir);
@@ -1995,7 +1755,12 @@ max_tool_rounds = 10
         )
         .await;
 
-        let candidates = agent.select_skill_candidates("帮我处理这个电子表格", &[]);
+        let candidates = agent
+            .select_skill_candidates(
+                "帮我处理这个电子表格 / Please help me with this spreadsheet",
+                &[],
+            )
+            .await;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "xlsx-cn");
 
@@ -2050,7 +1815,9 @@ max_tool_rounds = 10
         )
         .await;
 
-        let candidates = agent.select_skill_candidates("Please inspect this spreadsheet", &[]);
+        let candidates = agent
+            .select_skill_candidates("Please inspect this spreadsheet / 请检查这个电子表格", &[])
+            .await;
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].name, "keyword-skill");
         assert_eq!(candidates[1].name, "generic-description");
@@ -2106,11 +1873,43 @@ max_tool_rounds = 10
         )
         .await;
 
-        let candidates = agent.select_skill_candidates("请看下这个表格", &[]);
+        let candidates = agent.select_skill_candidates("请看下这个表格", &[]).await;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "visible-xlsx");
 
         let _ = std::fs::remove_dir_all(&workspace_dir);
         let _ = std::fs::remove_dir_all(&skill_dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_cached_workspace_extensions_supports_current_thread_runtime() {
+        let workspace =
+            std::env::temp_dir().join("anqclaw_workspace_extension_cache_current_thread");
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("first.txt"), "hello").unwrap();
+
+        let memory = test_memory().await;
+        let config = test_config_with_workspace(&workspace);
+        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+        }]));
+        let tools = Arc::new(ToolRegistry::new(
+            &config.tools,
+            &config.security,
+            &config.agent,
+            memory.clone(),
+            None,
+            vec![],
+            None,
+        ));
+        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+
+        let extensions = agent.cached_workspace_extensions().await;
+
+        assert!(extensions.contains(".txt"));
+
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 }

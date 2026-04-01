@@ -60,11 +60,17 @@ pub fn classify_error(
     if output.contains("ModuleNotFoundError") || output.contains("No module named") {
         let module = extract_module_name(output);
         let hint = if env.has("uv") {
-            Some(format!("You may install it / 可以安装: `uv pip install {module}`"))
+            Some(format!(
+                "You may install it / 可以安装: `uv pip install {module}`"
+            ))
         } else if env.has("pip3") {
-            Some(format!("You may install it / 可以安装: `pip3 install {module}`"))
+            Some(format!(
+                "You may install it / 可以安装: `pip3 install {module}`"
+            ))
         } else if env.has("pip") {
-            Some(format!("You may install it / 可以安装: `pip install {module}`"))
+            Some(format!(
+                "You may install it / 可以安装: `pip install {module}`"
+            ))
         } else {
             Some("pip is not available. Inform the user to install the package. / pip 不可用，请通知用户安装该包。".into())
         };
@@ -81,7 +87,9 @@ pub fn classify_error(
     if output.contains("Cannot find module") || output.contains("MODULE_NOT_FOUND") {
         let module = extract_node_module_name(output);
         let hint = if env.has("npm") {
-            Some(format!("You may install it / 可以安装: `npm install {module}`"))
+            Some(format!(
+                "You may install it / 可以安装: `npm install {module}`"
+            ))
         } else {
             Some("npm is not available. / npm 不可用。".into())
         };
@@ -111,7 +119,10 @@ pub fn classify_error(
             kind: ToolErrorKind::SyntaxError {
                 language: "python".into(),
             },
-            hint: Some("Check the generated code for syntax issues. / 请检查生成的代码是否有语法问题。".into()),
+            hint: Some(
+                "Check the generated code for syntax issues. / 请检查生成的代码是否有语法问题。"
+                    .into(),
+            ),
         };
     }
 
@@ -157,7 +168,10 @@ pub fn classify_error(
     if output.contains("No space left on device") || output.contains("ENOSPC") {
         return ErrorClassification {
             kind: ToolErrorKind::DiskFull,
-            hint: Some("Disk is full. Free up space before retrying. / 磁盘已满，请释放空间后重试。".into()),
+            hint: Some(
+                "Disk is full. Free up space before retrying. / 磁盘已满，请释放空间后重试。"
+                    .into(),
+            ),
         };
     }
 
@@ -301,10 +315,15 @@ fn suggest_install_command(command: &str, env: &EnvironmentProbe) -> Option<Stri
             if env.has("python3") || env.has("python") {
                 Some("python3 -m ensurepip --upgrade".into())
             } else {
-                Some("Install Python first (pip is included). / 请先安装 Python（pip 已包含在内）。".into())
+                Some(
+                    "Install Python first (pip is included). / 请先安装 Python（pip 已包含在内）。"
+                        .into(),
+                )
             }
         }
-        "node" | "npm" => Some("Install Node.js from https://nodejs.org / 请从 https://nodejs.org 安装 Node.js".into()),
+        "node" | "npm" => Some(
+            "Install Node.js from https://nodejs.org / 请从 https://nodejs.org 安装 Node.js".into(),
+        ),
         _ => None,
     }
 }

@@ -14,8 +14,8 @@ mod llm;
 mod memory;
 mod metrics;
 mod paths;
-mod session;
 mod scheduler;
+mod session;
 mod skill;
 mod token;
 mod tool;
@@ -443,18 +443,18 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
     // Create & spawn Gateway
     let app_metrics = Arc::new(metrics::Metrics::new());
 
-    // HTTP channel (optional)
-    if bs.config.http_channel.enabled {
-        let http_channel: Arc<dyn Channel> = Arc::new(HttpChannel::new(
+    // HTTP channel (optional) — gateway reference is injected after Gateway creation.
+    let http_channel_ref: Option<Arc<HttpChannel>> = if bs.config.http_channel.enabled {
+        let http_channel = Arc::new(HttpChannel::new(
             &bs.config.http_channel,
-            Some(bs.agent.clone()),
-            Some(bs.memory.clone()),
-            Some(bs.config.clone()),
             Some(app_metrics.clone()),
         ));
-        channels.push(http_channel);
+        channels.push(http_channel.clone() as Arc<dyn Channel>);
         tracing::info!(bind = %bs.config.http_channel.bind, "http channel enabled / HTTP 频道已启用");
-    }
+        Some(http_channel)
+    } else {
+        None
+    };
 
     if channels.is_empty() {
         tracing::warn!(
@@ -469,9 +469,16 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
         bs.config.clone(),
         app_metrics,
     );
+
+    if let Some(http_channel) = &http_channel_ref {
+        http_channel.set_gateway(gateway.clone());
+    }
+
     let gw = gateway.clone();
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let gw_shutdown = shutdown.clone();
     let gateway_handle = tokio::spawn(async move {
-        if let Err(e) = gw.run().await {
+        if let Err(e) = gw.run(gw_shutdown).await {
             tracing::error!(error = %e, "gateway exited with error / 网关退出并出错");
         }
     });
@@ -500,12 +507,13 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
             channels.clone(),
             &bs.home,
         );
+        let sched_shutdown = shutdown.clone();
         tracing::info!(
             task_count = sched.task_count(),
             "scheduler enabled / 调度器已启用"
         );
         Some(tokio::spawn(async move {
-            if let Err(e) = sched.run().await {
+            if let Err(e) = sched.run(sched_shutdown).await {
                 tracing::error!(error = %e, "scheduler exited with error / 调度器退出并出错");
             }
         }))
@@ -522,19 +530,26 @@ async fn run_serve(cli_config: Option<String>) -> anyhow::Result<()> {
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutdown signal received, stopping / 收到关闭信号，正在停止...");
 
-    gateway_handle.abort();
-    if let Some(sh) = scheduler_handle {
-        sh.abort();
-    }
+    // Signal all tasks to stop accepting new work
+    shutdown.cancel();
 
     tracing::info!(
         "waiting for in-flight tasks to finish (max 30s) / 等待进行中的任务完成（最多 30 秒）..."
     );
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        tokio::time::sleep(std::time::Duration::from_millis(500)),
-    )
-    .await;
+
+    // Wait for gateway and scheduler to drain gracefully, with a hard timeout
+    let drain = async {
+        let _ = gateway_handle.await;
+        if let Some(sh) = scheduler_handle {
+            let _ = sh.await;
+        }
+    };
+    if tokio::time::timeout(std::time::Duration::from_secs(30), drain)
+        .await
+        .is_err()
+    {
+        tracing::warn!("graceful drain timed out after 30s / 优雅排空超时（30 秒）");
+    }
 
     bs.memory.close().await;
     tracing::info!("anqclaw stopped, goodbye / anqclaw 已停止，再见!");
@@ -560,10 +575,13 @@ async fn run_chat(cli_config: Option<String>, message: Option<String>) -> anyhow
         app_metrics,
     );
 
+    let chat_shutdown = tokio_util::sync::CancellationToken::new();
+
     if is_single_shot {
         // Single-shot: run gateway, wait for it to complete, exit
         let gw = gateway.clone();
-        let handle = tokio::spawn(async move { gw.run().await });
+        let gw_token = chat_shutdown.clone();
+        let handle = tokio::spawn(async move { gw.run(gw_token).await });
 
         // Give the single message time to process, then shut down
         // The gateway will exit naturally when the CLI channel finishes
@@ -582,7 +600,8 @@ async fn run_chat(cli_config: Option<String>, message: Option<String>) -> anyhow
         println!("\x1b[1m🤖 anqclaw chat\x1b[0m — 输入 /exit 退出\n");
 
         let gw = gateway.clone();
-        let handle = tokio::spawn(async move { gw.run().await });
+        let gw_token = chat_shutdown.clone();
+        let handle = tokio::spawn(async move { gw.run(gw_token).await });
 
         tokio::select! {
             result = handle => {

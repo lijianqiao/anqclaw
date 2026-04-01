@@ -25,7 +25,11 @@ pub async fn run_list(memory: &MemoryStore) -> Result<()> {
         println!("{:<40} {:>6} {:>20}", s.chat_id, s.message_count, dt);
     }
 
-    println!("\nTotal: {} session(s) / 共 {} 个会话", sessions.len(), sessions.len());
+    println!(
+        "\nTotal: {} session(s) / 共 {} 个会话",
+        sessions.len(),
+        sessions.len()
+    );
     Ok(())
 }
 
@@ -41,7 +45,9 @@ pub async fn run_clean(memory: &MemoryStore, before: &str) -> Result<()> {
         .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
         .unwrap_or_else(|| cutoff.to_string());
 
-    println!("Deleted {deleted} message(s) from sessions last active before {dt}. / 已删除 {dt} 之前最后活跃的会话共 {deleted} 条消息。");
+    println!(
+        "Deleted {deleted} message(s) from sessions last active before {dt}. / 已删除 {dt} 之前最后活跃的会话共 {deleted} 条消息。"
+    );
     Ok(())
 }
 
@@ -52,7 +58,9 @@ pub async fn run_delete(memory: &MemoryStore, chat_id: &str) -> Result<()> {
     if deleted == 0 {
         println!("No messages found for session '{chat_id}'. / 会话 '{chat_id}' 未找到任何消息。");
     } else {
-        println!("Deleted {deleted} message(s) from session '{chat_id}'. / 已从会话 '{chat_id}' 删除 {deleted} 条消息。");
+        println!(
+            "Deleted {deleted} message(s) from session '{chat_id}'. / 已从会话 '{chat_id}' 删除 {deleted} 条消息。"
+        );
     }
     Ok(())
 }
@@ -62,23 +70,34 @@ pub async fn run_export(memory: &MemoryStore, chat_id: &str, output: Option<&str
     let export = memory.export_session(chat_id).await?;
 
     if export.messages.is_empty() {
-        anyhow::bail!("session '{chat_id}' not found or has no messages / 会话 '{chat_id}' 未找到或无消息");
+        anyhow::bail!(
+            "session '{chat_id}' not found or has no messages / 会话 '{chat_id}' 未找到或无消息"
+        );
     }
 
-    let json = serde_json::to_string_pretty(&export).context("serialize session / 序列化会话失败")?;
+    let json =
+        serde_json::to_string_pretty(&export).context("serialize session / 序列化会话失败")?;
 
     if let Some(path) = output {
         tokio::fs::write(path, &json)
             .await
             .with_context(|| format!("write to {path} / 写入 {path} 失败"))?;
-        println!("Exported {} message(s) → {path} / 已导出 {} 条消息至 {path}", export.messages.len(), export.messages.len());
+        println!(
+            "Exported {} message(s) → {path} / 已导出 {} 条消息至 {path}",
+            export.messages.len(),
+            export.messages.len()
+        );
     } else {
         // Default filename: <chat_id>.json
         let filename = format!("{chat_id}.json");
         tokio::fs::write(&filename, &json)
             .await
             .with_context(|| format!("write to {filename} / 写入 {filename} 失败"))?;
-        println!("Exported {} message(s) → {filename} / 已导出 {} 条消息至 {filename}", export.messages.len(), export.messages.len());
+        println!(
+            "Exported {} message(s) → {filename} / 已导出 {} 条消息至 {filename}",
+            export.messages.len(),
+            export.messages.len()
+        );
     }
 
     Ok(())
@@ -101,7 +120,9 @@ pub async fn run_import(memory: &MemoryStore, file: &str) -> Result<()> {
 
     memory.import_session(&export).await?;
 
-    println!("Imported {count} message(s) into session '{chat_id}'. / 已将 {count} 条消息导入会话 '{chat_id}'。");
+    println!(
+        "Imported {count} message(s) into session '{chat_id}'. / 已将 {count} 条消息导入会话 '{chat_id}'。"
+    );
     Ok(())
 }
 
@@ -111,7 +132,10 @@ pub async fn run_import(memory: &MemoryStore, file: &str) -> Result<()> {
 /// Supports: "30d" (days), "24h" (hours), "60m" (minutes), "3600s" (seconds).
 fn parse_duration(s: &str) -> Result<i64> {
     let s = s.trim();
-    anyhow::ensure!(!s.is_empty(), "duration string cannot be empty / 时间字符串不能为空");
+    anyhow::ensure!(
+        !s.is_empty(),
+        "duration string cannot be empty / 时间字符串不能为空"
+    );
 
     let (num_str, unit) = s.split_at(s.len() - 1);
     let num: i64 = num_str
@@ -123,7 +147,9 @@ fn parse_duration(s: &str) -> Result<i64> {
         "m" => 60,
         "h" => 3600,
         "d" => 86400,
-        _ => anyhow::bail!("unknown duration unit '{unit}', expected one of: s, m, h, d / 未知的时间单位 '{unit}'，支持: s, m, h, d"),
+        _ => anyhow::bail!(
+            "unknown duration unit '{unit}', expected one of: s, m, h, d / 未知的时间单位 '{unit}'，支持: s, m, h, d"
+        ),
     };
 
     Ok(num * multiplier)

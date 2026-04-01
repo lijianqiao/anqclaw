@@ -603,23 +603,25 @@ fn parse_frontmatter(
 
     let trigger = frontmatter.trigger.unwrap_or_default().trim().to_string();
 
-    Ok(Some(SkillMeta {
-        name,
-        description,
-        trigger,
-        keywords: normalize_list(frontmatter.keywords),
-        extensions: normalize_list(frontmatter.extensions),
-        priority: frontmatter.priority,
-        disable_model_invocation: frontmatter.disable_model_invocation,
-        source: source.name.clone(),
-        path: path.to_path_buf(),
-        normalized_name: String::new(),
-        normalized_description: String::new(),
-        normalized_triggers: vec![],
-        normalized_keywords: vec![],
-        normalized_extensions: vec![],
-    }
-    .with_normalized_terms()))
+    Ok(Some(
+        SkillMeta {
+            name,
+            description,
+            trigger,
+            keywords: normalize_list(frontmatter.keywords),
+            extensions: normalize_list(frontmatter.extensions),
+            priority: frontmatter.priority,
+            disable_model_invocation: frontmatter.disable_model_invocation,
+            source: source.name.clone(),
+            path: path.to_path_buf(),
+            normalized_name: String::new(),
+            normalized_description: String::new(),
+            normalized_triggers: vec![],
+            normalized_keywords: vec![],
+            normalized_extensions: vec![],
+        }
+        .with_normalized_terms(),
+    ))
 }
 
 fn extract_frontmatter(content: &str) -> Option<&str> {

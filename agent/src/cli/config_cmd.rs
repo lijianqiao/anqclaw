@@ -203,12 +203,18 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
     // 1. Check config file exists
     let config_path = match find_config(cli_config) {
         Some(p) => {
-            println!("✓ Config file found: {} / 配置文件已找到: {}", p.display(), p.display());
+            println!(
+                "✓ Config file found: {} / 配置文件已找到: {}",
+                p.display(),
+                p.display()
+            );
             p
         }
         None => {
             println!("✗ No config file found / 未找到配置文件");
-            println!("  Run `anqclaw onboard` to create one. / 运行 `anqclaw onboard` 创建配置文件。");
+            println!(
+                "  Run `anqclaw onboard` to create one. / 运行 `anqclaw onboard` 创建配置文件。"
+            );
             return Ok(());
         }
     };
@@ -227,7 +233,9 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
                     config.llm.provider, config.llm.provider
                 );
             } else {
-                println!("✗ LLM api_key is empty — set it in config or via env var / LLM api_key 为空，请在配置文件或环境变量中设置");
+                println!(
+                    "✗ LLM api_key is empty — set it in config or via env var / LLM api_key 为空，请在配置文件或环境变量中设置"
+                );
             }
 
             // 4. Check feishu (channel.feishu or legacy [feishu])
@@ -248,11 +256,16 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
             // 5. Check workspace directory
             let ws = resolve_path(&home, &config.app.workspace);
             if ws.exists() {
-                println!("✓ Workspace directory exists: {} / 工作空间目录存在: {}", ws.display(), ws.display());
+                println!(
+                    "✓ Workspace directory exists: {} / 工作空间目录存在: {}",
+                    ws.display(),
+                    ws.display()
+                );
             } else {
                 println!(
                     "⚠ Workspace directory missing: {} (will be created on first run) / 工作空间目录不存在: {}（首次运行时将自动创建）",
-                    ws.display(), ws.display()
+                    ws.display(),
+                    ws.display()
                 );
             }
 
@@ -260,11 +273,16 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
             let db = resolve_path(&home, &config.memory.db_path);
             if let Some(parent) = db.parent() {
                 if parent.exists() {
-                    println!("✓ Data directory exists: {} / 数据目录存在: {}", parent.display(), parent.display());
+                    println!(
+                        "✓ Data directory exists: {} / 数据目录存在: {}",
+                        parent.display(),
+                        parent.display()
+                    );
                 } else {
                     println!(
                         "⚠ Data directory missing: {} (will be created on first run) / 数据目录不存在: {}（首次运行时将自动创建）",
-                        parent.display(), parent.display()
+                        parent.display(),
+                        parent.display()
                     );
                 }
             }
@@ -283,11 +301,16 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
                     config.agent.managed_python_version
                 );
                 if venv.exists() {
-                    println!("✓ Managed venv already exists: {} / 托管虚拟环境已存在: {}", venv.display(), venv.display());
+                    println!(
+                        "✓ Managed venv already exists: {} / 托管虚拟环境已存在: {}",
+                        venv.display(),
+                        venv.display()
+                    );
                 } else {
                     println!(
                         "ℹ Managed venv not created yet: {} (will bootstrap on first Python task) / 托管虚拟环境尚未创建: {}（首次 Python 任务时将自动自举）",
-                        venv.display(), venv.display()
+                        venv.display(),
+                        venv.display()
                     );
                 }
             } else {
@@ -299,15 +322,24 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
                 let log_path = resolve_path(&home, &config.app.log_file);
                 if let Some(parent) = log_path.parent() {
                     if parent.exists() {
-                        println!("✓ App log directory exists: {} / 应用日志目录存在: {}", parent.display(), parent.display());
+                        println!(
+                            "✓ App log directory exists: {} / 应用日志目录存在: {}",
+                            parent.display(),
+                            parent.display()
+                        );
                     } else {
                         println!(
                             "⚠ App log directory missing: {} (will be created on first run) / 应用日志目录不存在: {}（首次运行时将自动创建）",
-                            parent.display(), parent.display()
+                            parent.display(),
+                            parent.display()
                         );
                     }
                 }
-                println!("✓ App log file configured: {} / 应用日志文件已配置: {}", log_path.display(), log_path.display());
+                println!(
+                    "✓ App log file configured: {} / 应用日志文件已配置: {}",
+                    log_path.display(),
+                    log_path.display()
+                );
             } else {
                 println!(
                     "⚠ App log file is empty — bootstrap and script logs will only appear on stderr / 应用日志文件未配置，自举和脚本日志仅输出到 stderr"

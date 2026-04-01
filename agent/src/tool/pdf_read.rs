@@ -102,8 +102,9 @@ impl PdfRead {
         {
             let path_clone = path.clone();
             let text = tokio::task::spawn_blocking(move || -> Result<String> {
-                let bytes = std::fs::read(&path_clone)
-                    .map_err(|e| anyhow::anyhow!("read `{}`: {e} / 读取文件失败", path_clone.display()))?;
+                let bytes = std::fs::read(&path_clone).map_err(|e| {
+                    anyhow::anyhow!("read `{}`: {e} / 读取文件失败", path_clone.display())
+                })?;
                 pdf_extract::extract_text_from_mem(&bytes)
                     .map_err(|e| anyhow::anyhow!("PDF extraction failed / PDF 提取失败: {e}"))
             })

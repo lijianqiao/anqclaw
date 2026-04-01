@@ -51,14 +51,18 @@ impl WebFetch {
     fn check_host(&self, host: &str) -> Result<()> {
         for blocked in &self.blocked_domains {
             if host == blocked.as_str() || host.ends_with(&format!(".{blocked}")) {
-                bail!("domain `{host}` is blocked (anti-SSRF protection) / 域名 `{host}` 已被屏蔽（防 SSRF 保护）");
+                bail!(
+                    "domain `{host}` is blocked (anti-SSRF protection) / 域名 `{host}` 已被屏蔽（防 SSRF 保护）"
+                );
             }
         }
 
         if let Ok(ip) = host.parse::<IpAddr>()
             && Self::is_blocked_ip(ip)
         {
-            bail!("IP address `{host}` is blocked — private/reserved range (anti-SSRF) / IP 地址 `{host}` 已被屏蔽——私有/保留地址段（防 SSRF）");
+            bail!(
+                "IP address `{host}` is blocked — private/reserved range (anti-SSRF) / IP 地址 `{host}` 已被屏蔽——私有/保留地址段（防 SSRF）"
+            );
         }
 
         Ok(())
@@ -76,9 +80,9 @@ impl WebFetch {
         self.check_host(host)?;
 
         if host.parse::<IpAddr>().is_err() {
-            let port = url
-                .port_or_known_default()
-                .ok_or_else(|| anyhow::anyhow!("cannot determine port for URL / 无法确定 URL 的端口"))?;
+            let port = url.port_or_known_default().ok_or_else(|| {
+                anyhow::anyhow!("cannot determine port for URL / 无法确定 URL 的端口")
+            })?;
             for addr in lookup_host((host, port)).await? {
                 if Self::is_blocked_ip(addr.ip()) {
                     bail!(
@@ -116,7 +120,11 @@ impl WebFetch {
                 let location = resp
                     .headers()
                     .get(LOCATION)
-                    .ok_or_else(|| anyhow::anyhow!("redirect response missing Location header / 重定向响应缺少 Location 头"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "redirect response missing Location header / 重定向响应缺少 Location 头"
+                        )
+                    })?
                     .to_str()?;
                 current_url = current_url.join(location)?;
                 validate(current_url.clone()).await?;
@@ -126,7 +134,13 @@ impl WebFetch {
         };
 
         if !resp.status().is_success() {
-            bail!("HTTP {}: {} / HTTP 请求失败 {}: {}", resp.status(), current_url, resp.status(), current_url);
+            bail!(
+                "HTTP {}: {} / HTTP 请求失败 {}: {}",
+                resp.status(),
+                current_url,
+                resp.status(),
+                current_url
+            );
         }
 
         let bytes = resp.bytes().await?;
@@ -350,6 +364,7 @@ mod tests {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .build()
             .unwrap();
         let start_url = Url::parse(&format!("http://127.0.0.1:{}/start", addr.port())).unwrap();
@@ -415,6 +430,7 @@ mod tests {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .build()
             .unwrap();
         let start_url = Url::parse(&format!("http://127.0.0.1:{}/start", addr_one.port())).unwrap();

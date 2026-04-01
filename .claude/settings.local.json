@@ -1,6 +1,5 @@
 {
   "permissions": {
-    "initialPermissionMode": "acceptEdits",
     "allow": [
       "Read",
       "Write",
@@ -35,12 +34,14 @@
       "Bash(cargo test:*)",
       "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
       "mcp__plugin_context-mode_context-mode__ctx_execute",
-      "mcp__plugin_context-mode_context-mode__ctx_execute_file"
+      "mcp__plugin_context-mode_context-mode__ctx_execute_file",
+      "mcp__plugin_context-mode_context-mode__ctx_search"
     ],
     "deny": [
       "Rm",
       "Ssh",
       "Sud"
-    ]
+    ],
+    "initialPermissionMode": "acceptEdits"
   }
 }

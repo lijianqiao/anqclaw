@@ -34,7 +34,11 @@ impl CustomTool {
         } else {
             let tokens = Self::tokenize_argv(&config.command)?;
             let (executable, args) = tokens.split_first().ok_or_else(|| {
-                anyhow::anyhow!("custom tool `{}` has an empty command / 自定义工具 `{}` 命令为空", config.name, config.name)
+                anyhow::anyhow!(
+                    "custom tool `{}` has an empty command / 自定义工具 `{}` 命令为空",
+                    config.name,
+                    config.name
+                )
             })?;
             (executable.clone(), args.to_vec())
         };
@@ -54,7 +58,9 @@ impl CustomTool {
         reject_unquoted_shell_metacharacters(input)?;
         tokenize_quoted_args(input).map_err(|error| match error.to_string().as_str() {
             "unclosed quote in command / 命令中有未闭合的引号" => {
-                anyhow::anyhow!("unclosed quote in custom tool command / 自定义工具命令中有未闭合的引号")
+                anyhow::anyhow!(
+                    "unclosed quote in custom tool command / 自定义工具命令中有未闭合的引号"
+                )
             }
             "empty command / 空命令" => {
                 anyhow::anyhow!("custom tool command is empty / 自定义工具命令为空")
@@ -69,13 +75,16 @@ impl CustomTool {
             Some(serde_json::Value::Array(values)) => values
                 .iter()
                 .map(|value| {
-                    value
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| anyhow::anyhow!("custom tool args must be strings / 自定义工具参数必须是字符串"))
+                    value.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "custom tool args must be strings / 自定义工具参数必须是字符串"
+                        )
+                    })
                 })
                 .collect(),
-            Some(_) => bail!("custom tool `args` must be a string or array of strings / 自定义工具 `args` 必须是字符串或字符串数组"),
+            Some(_) => bail!(
+                "custom tool `args` must be a string or array of strings / 自定义工具 `args` 必须是字符串或字符串数组"
+            ),
             None => Ok(vec![]),
         }
     }
@@ -181,9 +190,12 @@ impl Tool for CustomTool {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
 
-            let child = child
-                .spawn()
-                .map_err(|e| anyhow::anyhow!("failed to spawn custom tool `{}`: {e} / 启动自定义工具失败", self.name))?;
+            let child = child.spawn().map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to spawn custom tool `{}`: {e} / 启动自定义工具失败",
+                    self.name
+                )
+            })?;
 
             let output = tokio::time::timeout(self.timeout, child.wait_with_output())
                 .await

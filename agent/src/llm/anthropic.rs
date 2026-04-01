@@ -104,65 +104,29 @@ impl AnthropicClient {
     ) -> Result<LlmResponse> {
         let body = self.build_request_body(messages, tools, false);
 
-        // 5. HTTP with retry (429, 500, 529)
-        let mut last_err = None;
-        for attempt in 0..3u32 {
-            if attempt > 0 {
-                let backoff = Duration::from_millis(1000 * 2u64.pow(attempt - 1));
-                tracing::warn!(
-                    attempt,
-                    ?backoff,
-                    "retrying Anthropic request / 正在重试 Anthropic 请求"
-                );
-                tokio::time::sleep(backoff).await;
-            }
+        // Retry is handled by the outer RetryLlmClient — no internal retry here.
+        let resp = self
+            .http
+            .post(ANTHROPIC_API_URL)
+            .header("x-api-key", self.api_key.expose_secret())
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .context("Anthropic HTTP request failed / Anthropic HTTP 请求失败")?;
 
-            let resp = self
-                .http
-                .post(ANTHROPIC_API_URL)
-                .header("x-api-key", self.api_key.expose_secret())
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await;
-
-            match resp {
-                Ok(r) if r.status().is_success() => {
-                    let ant_resp: AntResponse = r
-                        .json()
-                        .await
-                        .context("deserialise Anthropic response / 反序列化 Anthropic 响应失败")?;
-                    return parse_ant_response(ant_resp);
-                }
-                Ok(r)
-                    if r.status().as_u16() == 429
-                        || r.status().as_u16() == 529
-                        || r.status().is_server_error() =>
-                {
-                    let status = r.status();
-                    let text = r.text().await.unwrap_or_default();
-                    tracing::warn!(%status, body = %text, "retryable error from Anthropic / Anthropic 可重试错误");
-                    last_err = Some(anyhow::anyhow!("HTTP {status}: {text}"));
-                }
-                Ok(r) => {
-                    let status = r.status();
-                    let text = r.text().await.unwrap_or_default();
-                    anyhow::bail!(
-                        "Anthropic non-retryable error HTTP {status}: {text} / Anthropic 不可重试错误 HTTP {status}: {text}"
-                    );
-                }
-                Err(e) => {
-                    last_err = Some(e.into());
-                }
-            }
+        if resp.status().is_success() {
+            let ant_resp: AntResponse = resp
+                .json()
+                .await
+                .context("deserialise Anthropic response / 反序列化 Anthropic 响应失败")?;
+            return parse_ant_response(ant_resp);
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            anyhow::anyhow!(
-                "Anthropic request failed after retries / Anthropic 请求在重试后仍然失败"
-            )
-        }))
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Anthropic HTTP {status}: {text}");
     }
 
     /// Streaming version — sends SSE request, returns a channel of StreamEvents.

@@ -48,7 +48,9 @@ pub async fn run_with_reconnect(
     loop {
         match listen_ws(api, &tx, allow_from, &mut seen_ids).await {
             Ok(()) => {
-                tracing::info!("Feishu WS: connection closed, reconnecting / Feishu WS: 连接已关闭，正在重连");
+                tracing::info!(
+                    "Feishu WS: connection closed, reconnecting / Feishu WS: 连接已关闭，正在重连"
+                );
                 attempt = 0;
             }
             Err(e) => {
@@ -87,7 +89,9 @@ async fn listen_ws(
     tracing::info!("Feishu WS: connecting to {wss_url} / Feishu WS: 正在连接 {wss_url}");
     let (ws_stream, _) = tokio_tungstenite::connect_async(&wss_url).await?;
     let (mut write, mut read) = ws_stream.split();
-    tracing::info!("Feishu WS: connected (service_id={service_id}) / Feishu WS: 连接成功 (service_id={service_id})");
+    tracing::info!(
+        "Feishu WS: connected (service_id={service_id}) / Feishu WS: 连接成功 (service_id={service_id})"
+    );
 
     // Ping interval from server config (default 120s, min 10s)
     let mut ping_secs = client_config.ping_interval.unwrap_or(120).max(10);
@@ -357,7 +361,10 @@ fn handle_control_frame(
         if secs != *ping_secs {
             *ping_secs = secs;
             *hb_interval = tokio::time::interval(Duration::from_secs(secs));
-            tracing::info!(ping_interval = secs, "Feishu WS: ping_interval updated / Feishu WS: ping 间隔已更新");
+            tracing::info!(
+                ping_interval = secs,
+                "Feishu WS: ping_interval updated / Feishu WS: ping 间隔已更新"
+            );
         }
     }
 }

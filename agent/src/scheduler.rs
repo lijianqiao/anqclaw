@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use cron::Schedule;
+use tokio_util::sync::CancellationToken;
 
 use crate::agent::AgentCore;
 use crate::channel::Channel;
@@ -23,7 +24,9 @@ use crate::paths::resolve_path;
 use crate::types::InboundMessage;
 
 const SCHEDULER_HISTORY_LIMIT: usize = 5;
-const SCHEDULER_POLL_INTERVAL_SECS: u64 = 30;
+const SCHEDULER_MIN_SLEEP_MILLIS: u64 = 100;
+const SCHEDULER_OVERDUE_MIN_BACKOFF_MILLIS: u64 = 200;
+const SCHEDULER_OVERDUE_MAX_BACKOFF_SECS: u64 = 30;
 
 // ─── Scheduler ──────────────────────────────────────────────────────────────
 
@@ -118,9 +121,9 @@ impl Scheduler {
         self.tasks.len()
     }
 
-    /// Runs the scheduler loop forever, checking every 30 seconds for tasks
-    /// whose next fire time has passed.
-    pub async fn run(&self) -> anyhow::Result<()> {
+    /// Runs the scheduler loop until the shutdown token is cancelled,
+    /// sleeping until the next scheduled task instead of fixed-interval polling.
+    pub async fn run(&self, shutdown: CancellationToken) -> anyhow::Result<()> {
         if self.tasks.is_empty() {
             tracing::info!("scheduler: no tasks registered, exiting / 调度器: 无注册任务，退出");
             return Ok(());
@@ -137,22 +140,49 @@ impl Scheduler {
             .iter()
             .map(|task| task.next_run_after(now))
             .collect();
-
-        let mut interval = tokio::time::interval(Duration::from_secs(SCHEDULER_POLL_INTERVAL_SECS));
-        // Consume the immediate first tick
-        interval.tick().await;
+        let mut consecutive_overdue_runs = vec![0u32; self.tasks.len()];
 
         loop {
-            interval.tick().await;
             let now = Utc::now();
-
             for (i, task) in self.tasks.iter().enumerate() {
                 if next_runs[i] <= now {
                     next_runs[i] = task.next_run_after(now);
                     self.run_task(task).await;
+                    if next_runs[i] <= Utc::now() {
+                        consecutive_overdue_runs[i] = consecutive_overdue_runs[i].saturating_add(1);
+                    } else {
+                        consecutive_overdue_runs[i] = 0;
+                    }
+                } else {
+                    consecutive_overdue_runs[i] = 0;
                 }
             }
+
+            let sleep_reference = Utc::now();
+            let sleep_duration = next_runs
+                .iter()
+                .enumerate()
+                .map(|(index, next_run)| {
+                    scheduler_sleep_duration(
+                        *next_run,
+                        sleep_reference,
+                        consecutive_overdue_runs[index],
+                    )
+                })
+                .min()
+                .unwrap_or_else(|| Duration::from_millis(SCHEDULER_MIN_SLEEP_MILLIS));
+
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    tracing::info!("scheduler: shutdown signal received / 调度器: 收到关闭信号");
+                    break;
+                }
+                _ = tokio::time::sleep(sleep_duration) => {}
+            }
         }
+
+        Ok(())
     }
 
     async fn run_task(&self, task: &ScheduledTask) {
@@ -291,4 +321,64 @@ impl ScheduledTask {
 
 fn duration_to_chrono(duration: Duration) -> ChronoDuration {
     ChronoDuration::from_std(duration).unwrap_or_else(|_| ChronoDuration::seconds(i64::MAX))
+}
+
+fn scheduler_sleep_duration(
+    next_run: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+    consecutive_overdue_runs: u32,
+) -> Duration {
+    match next_run.signed_duration_since(now).to_std() {
+        Ok(delay) => delay.max(Duration::from_millis(SCHEDULER_MIN_SLEEP_MILLIS)),
+        Err(_) => scheduler_overdue_backoff(consecutive_overdue_runs),
+    }
+}
+
+fn scheduler_overdue_backoff(consecutive_overdue_runs: u32) -> Duration {
+    let exponent = consecutive_overdue_runs.saturating_sub(1).min(8);
+    let millis = SCHEDULER_OVERDUE_MIN_BACKOFF_MILLIS.saturating_mul(1u64 << exponent);
+    Duration::from_millis(millis).min(Duration::from_secs(SCHEDULER_OVERDUE_MAX_BACKOFF_SECS))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scheduler_sleep_duration_uses_positive_delta() {
+        let now = Utc::now();
+        let next_run = now + ChronoDuration::seconds(2);
+
+        let sleep = scheduler_sleep_duration(next_run, now, 0);
+
+        assert!(sleep >= Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_scheduler_sleep_duration_applies_overdue_backoff() {
+        let now = Utc::now();
+        let next_run = now - ChronoDuration::seconds(5);
+
+        let first_backoff = scheduler_sleep_duration(next_run, now, 1);
+        let third_backoff = scheduler_sleep_duration(next_run, now, 3);
+
+        assert_eq!(
+            first_backoff,
+            Duration::from_millis(SCHEDULER_OVERDUE_MIN_BACKOFF_MILLIS)
+        );
+        assert_eq!(third_backoff, Duration::from_millis(800));
+    }
+
+    #[test]
+    fn test_scheduler_sleep_duration_caps_overdue_backoff() {
+        let now = Utc::now();
+        let next_run = now - ChronoDuration::seconds(5);
+
+        let sleep = scheduler_sleep_duration(next_run, now, 99);
+
+        assert_eq!(
+            sleep,
+            Duration::from_secs(SCHEDULER_OVERDUE_MAX_BACKOFF_SECS)
+        );
+    }
 }

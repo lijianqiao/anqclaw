@@ -65,5 +65,4 @@ mod tests {
         // 8 CJK chars → ~12 tokens + 1 = ~13
         assert!(tokens > 8 && tokens < 20, "got {tokens}");
     }
-
 }

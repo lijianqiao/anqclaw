@@ -58,7 +58,11 @@ impl Tool for SwitchModel {
             let profile_name = args
                 .get("profile_name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("missing required parameter: profile_name / 缺少必需参数: profile_name"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing required parameter: profile_name / 缺少必需参数: profile_name"
+                    )
+                })?;
 
             if !self.available_profiles.contains(profile_name) {
                 let available: Vec<&str> =

@@ -70,7 +70,7 @@ impl OpenAiCompatClient {
         req
     }
 
-    /// Performs the actual HTTP request with retry logic.
+    /// Performs the actual HTTP request (retry is handled by outer RetryLlmClient).
     async fn do_chat(
         &self,
         messages: &[ChatMessage],
@@ -91,46 +91,26 @@ impl OpenAiCompatClient {
             body["tools"] = serde_json::to_value(&req_tools)?;
         }
 
-        // Retry up to 3 times on 429 / 5xx
-        let mut last_err = None;
-        for attempt in 0..3u32 {
-            if attempt > 0 {
-                let backoff = Duration::from_millis(1000 * 2u64.pow(attempt - 1));
-                tracing::warn!(attempt, ?backoff, "retrying OpenAI-compat request / 正在重试 OpenAI 兼容请求");
-                tokio::time::sleep(backoff).await;
-            }
+        // Retry is handled by the outer RetryLlmClient — no internal retry here.
+        let req = self.apply_request_headers(self.http.post(&self.endpoint));
 
-            let req = self.apply_request_headers(self.http.post(&self.endpoint));
+        let resp = req
+            .json(&body)
+            .send()
+            .await
+            .context("OpenAI-compat HTTP request failed / OpenAI 兼容 HTTP 请求失败")?;
 
-            let resp = req.json(&body).send().await;
-
-            match resp {
-                Ok(r) if r.status().is_success() => {
-                    let oai_resp: OaiResponse = r
-                        .json()
-                        .await
-                        .context("deserialise OpenAI-compat response / 反序列化 OpenAI 兼容响应失败")?;
-                    return parse_oai_response(oai_resp);
-                }
-                Ok(r) if r.status().as_u16() == 429 || r.status().is_server_error() => {
-                    let status = r.status();
-                    let text = r.text().await.unwrap_or_default();
-                    tracing::warn!(%status, body = %text, "retryable error from OpenAI-compat / OpenAI 兼容可重试错误");
-                    last_err = Some(anyhow::anyhow!("HTTP {status}: {text}"));
-                }
-                Ok(r) => {
-                    let status = r.status();
-                    let text = r.text().await.unwrap_or_default();
-                    anyhow::bail!("OpenAI-compat non-retryable error HTTP {status}: {text} / OpenAI 兼容不可重试错误 HTTP {status}: {text}");
-                }
-                Err(e) => {
-                    last_err = Some(e.into());
-                }
-            }
+        if resp.status().is_success() {
+            let oai_resp: OaiResponse = resp
+                .json()
+                .await
+                .context("deserialise OpenAI-compat response / 反序列化 OpenAI 兼容响应失败")?;
+            return parse_oai_response(oai_resp);
         }
 
-        Err(last_err
-            .unwrap_or_else(|| anyhow::anyhow!("OpenAI-compat request failed after retries / OpenAI 兼容请求在重试后仍然失败")))
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("OpenAI-compat HTTP {status}: {text}");
     }
 
     /// Streaming version — sends SSE request, returns a channel of StreamEvents.
@@ -161,7 +141,9 @@ impl OpenAiCompatClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenAI-compat streaming error HTTP {status}: {text} / OpenAI 兼容流式错误 HTTP {status}: {text}");
+            anyhow::bail!(
+                "OpenAI-compat streaming error HTTP {status}: {text} / OpenAI 兼容流式错误 HTTP {status}: {text}"
+            );
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -180,7 +162,9 @@ impl OpenAiCompatClient {
                     Ok(Some(chunk)) => {
                         buffer.push_str(&String::from_utf8_lossy(&chunk));
                         if buffer.len() > MAX_BUFFER_SIZE {
-                            tracing::warn!("OpenAI SSE buffer exceeded limit, truncating / OpenAI SSE 缓冲区超出限制，正在截断");
+                            tracing::warn!(
+                                "OpenAI SSE buffer exceeded limit, truncating / OpenAI SSE 缓冲区超出限制，正在截断"
+                            );
                             break;
                         }
                     }

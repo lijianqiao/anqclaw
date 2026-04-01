@@ -65,9 +65,7 @@ pub(super) fn trim_messages_to_budget(
     let mut accumulated = 0u64;
     let mut keep_from = system_end;
     for index in (system_end..history_end).rev() {
-        let tokens = messages[index]
-            .estimated_tokens()
-            .expect("token estimate must exist before trimming") as u64;
+        let tokens = messages[index].estimate_tokens_cached() as u64;
         if accumulated + tokens > budget_for_history {
             keep_from = index + 1;
             break;
