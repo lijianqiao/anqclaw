@@ -10,6 +10,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::agent::util::{
+    extract_description_terms, rwlock_read_or_recover, rwlock_write_or_recover,
+};
+
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const DEFAULT_MAX_SKILL_FILE_BYTES: u64 = 256 * 1024;
 
@@ -87,6 +91,7 @@ pub struct SkillMeta {
     pub path: PathBuf,
     normalized_name: String,
     normalized_description: String,
+    normalized_description_terms: Vec<String>,
     normalized_triggers: Vec<String>,
     normalized_keywords: Vec<String>,
     normalized_extensions: Vec<String>,
@@ -96,6 +101,13 @@ impl SkillMeta {
     fn with_normalized_terms(mut self) -> Self {
         self.normalized_name = self.name.trim().to_lowercase();
         self.normalized_description = self.description.trim().to_lowercase();
+        self.normalized_description_terms = {
+            let mut terms: Vec<String> = extract_description_terms(&self.normalized_description)
+                .into_iter()
+                .collect();
+            terms.sort();
+            terms
+        };
         self.normalized_triggers = split_terms(&self.trigger);
         self.normalized_keywords = normalize_keywords(&self.keywords);
         self.normalized_extensions = normalize_extensions(&self.extensions);
@@ -110,6 +122,11 @@ impl SkillMeta {
     /// Return the normalized description for matching.
     pub fn normalized_description(&self) -> &str {
         &self.normalized_description
+    }
+
+    /// Return normalized description-derived terms for matching.
+    pub fn description_terms(&self) -> &[String] {
+        &self.normalized_description_terms
     }
 
     /// Return normalized trigger terms for matching.
@@ -207,27 +224,18 @@ impl SkillRegistry {
     pub fn reload(&self) {
         let new_skills = scan_skills(&self.sources, self.max_skill_file_bytes);
         let count = new_skills.len();
-        // unwrap_or_else recovers from poisoned lock (previous panic while holding write)
-        match self.skills.write() {
-            Ok(mut guard) => *guard = new_skills,
-            Err(e) => *e.into_inner() = new_skills,
-        }
+        *rwlock_write_or_recover(&self.skills) = new_skills;
         tracing::info!(count, "skills reloaded / 技能已重新加载");
     }
 
     /// Returns metadata for all loaded skills (cloned snapshot).
     pub fn list(&self) -> Vec<SkillMeta> {
-        self.skills
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        rwlock_read_or_recover(&self.skills).clone()
     }
 
     /// Find a skill by name.
     pub fn find(&self, name: &str) -> Option<SkillMeta> {
-        self.skills
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        rwlock_read_or_recover(&self.skills)
             .iter()
             .find(|s| s.name == name)
             .cloned()
@@ -616,6 +624,7 @@ fn parse_frontmatter(
             path: path.to_path_buf(),
             normalized_name: String::new(),
             normalized_description: String::new(),
+            normalized_description_terms: vec![],
             normalized_triggers: vec![],
             normalized_keywords: vec![],
             normalized_extensions: vec![],
@@ -734,6 +743,7 @@ mod tests {
         assert_eq!(meta.extensions, vec![".rs", ".py"]);
         assert_eq!(meta.normalized_name(), "code-review");
         assert_eq!(meta.normalized_description(), "expert code reviewer");
+        assert_eq!(meta.description_terms(), &["code", "expert", "reviewer"]);
         assert_eq!(meta.trigger_terms(), &["code review", "cr", "review"]);
         assert_eq!(meta.keyword_terms(), &["reviewer", "static-analysis"]);
         assert_eq!(meta.extension_terms(), &[".rs", ".py"]);

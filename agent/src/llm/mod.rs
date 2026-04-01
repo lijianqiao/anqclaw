@@ -3,12 +3,15 @@ pub mod openai_compat;
 pub mod retry;
 
 use anyhow::Result;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::config::LlmSection;
-use crate::types::{ChatMessage, LlmResponse, StreamEvent, ToolDefinition};
+use crate::types::{ChatMessage, LlmResponse, StreamEvent, ToolCall, ToolDefinition};
+
+pub(crate) type StreamToolCallAccumulator = HashMap<usize, (String, String, String)>;
 
 // ─── LlmClient Trait ─────────────────────────────────────────────────────────
 
@@ -49,6 +52,32 @@ pub trait LlmClient: Send + Sync {
             let _ = tx.send(StreamEvent::Done(resp)).await;
             Ok(rx)
         })
+    }
+}
+
+pub(crate) fn finalize_stream_response(
+    full_text: String,
+    mut tc_acc: StreamToolCallAccumulator,
+) -> LlmResponse {
+    let mut tool_calls = Vec::new();
+    let mut keys: Vec<usize> = tc_acc.keys().copied().collect();
+    keys.sort();
+
+    for key in keys {
+        let Some((id, name, args)) = tc_acc.remove(&key) else {
+            continue;
+        };
+        let arguments = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+        tool_calls.push(ToolCall {
+            id,
+            name,
+            arguments,
+        });
+    }
+
+    LlmResponse {
+        text: (!full_text.is_empty()).then_some(full_text),
+        tool_calls,
     }
 }
 

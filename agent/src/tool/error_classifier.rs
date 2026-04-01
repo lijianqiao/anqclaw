@@ -344,7 +344,6 @@ mod tests {
                 BinaryInfo {
                     available: *available,
                     version: None,
-                    path: None,
                 },
             );
         }

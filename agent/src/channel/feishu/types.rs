@@ -88,8 +88,6 @@ pub struct LarkEvent {
 #[derive(Debug, serde::Deserialize)]
 pub struct LarkEventHeader {
     pub event_type: String,
-    #[allow(dead_code)]
-    pub event_id: String,
 }
 
 /// Payload for `im.message.receive_v1` events.
@@ -115,8 +113,6 @@ pub struct LarkSenderId {
 pub struct LarkMessage {
     pub message_id: String,
     pub chat_id: String,
-    #[allow(dead_code)]
-    pub chat_type: String,
     pub message_type: String,
     #[serde(default)]
     pub content: String,
@@ -550,7 +546,6 @@ mod tests {
             message: LarkMessage {
                 message_id: "om_test".into(),
                 chat_id: "oc_test".into(),
-                chat_type: "p2p".into(),
                 message_type: "post".into(),
                 content: serde_json::json!({
                     "title": "",

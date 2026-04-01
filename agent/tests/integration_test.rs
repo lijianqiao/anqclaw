@@ -168,6 +168,7 @@ async fn test_pure_text_reply() {
     assert_eq!(reply.content, "Hello! How can I help?");
     assert_eq!(reply.channel, "test");
     assert_eq!(reply.chat_id, "chat_integration");
+    assert_eq!(reply.reply_to.as_deref(), Some(msg.message_id.as_str()));
     // persist: user message + assistant message
     assert_eq!(persist.len(), 2);
 }
@@ -214,6 +215,7 @@ async fn test_tool_call_and_reply() {
     let (reply, persist) = agent.handle(&msg, &[]).await;
 
     assert_eq!(reply.content, "I've saved your name!");
+    assert_eq!(reply.reply_to.as_deref(), Some(msg.message_id.as_str()));
     // persist: user + assistant(tool_call) + tool_result + assistant(text)
     assert_eq!(persist.len(), 4);
 

@@ -12,8 +12,6 @@ use crate::config::AgentSection;
 pub struct BinaryInfo {
     pub available: bool,
     pub version: Option<String>,
-    #[allow(dead_code)]
-    pub path: Option<String>,
 }
 
 /// Holds probe results for all binaries.
@@ -76,7 +74,6 @@ impl EnvironmentProbe {
                     BinaryInfo {
                         available: true,
                         version: py.version.clone(),
-                        path: py.path.clone(),
                     },
                 );
             }
@@ -202,21 +199,19 @@ async fn probe_binary(name: &str) -> BinaryInfo {
         "which"
     };
 
-    let path = match tokio::time::timeout(
+    let available = matches!(
+        tokio::time::timeout(
         std::time::Duration::from_secs(2),
         run_cmd(which_cmd, &[name]),
     )
-    .await
-    {
-        Ok(Ok(output)) if !output.is_empty() => Some(output),
-        _ => None,
-    };
+        .await,
+        Ok(Ok(output)) if !output.is_empty()
+    );
 
-    if path.is_none() {
+    if !available {
         return BinaryInfo {
             available: false,
             version: None,
-            path: None,
         };
     }
 
@@ -237,7 +232,6 @@ async fn probe_binary(name: &str) -> BinaryInfo {
     BinaryInfo {
         available: true,
         version,
-        path: path.map(|p| p.lines().next().unwrap_or("").trim().to_string()),
     }
 }
 
@@ -277,11 +271,6 @@ mod tests {
                 BinaryInfo {
                     available: *available,
                     version: version.map(|v| v.to_string()),
-                    path: if *available {
-                        Some(format!("/usr/bin/{name}"))
-                    } else {
-                        None
-                    },
                 },
             );
         }

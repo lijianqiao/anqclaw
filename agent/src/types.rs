@@ -94,18 +94,19 @@ pub struct OutboundMessage {
 }
 
 impl OutboundMessage {
-    /// Creates an error reply targeting the same chat/channel as the inbound message.
-    pub fn error(msg: &InboundMessage, error: &str) -> Self {
+    /// Creates a reply targeting the same chat/channel as the inbound message.
+    pub fn reply(msg: &InboundMessage, content: impl Into<String>) -> Self {
         Self {
             channel: msg.channel.clone(),
             chat_id: msg.chat_id.clone(),
-            reply_to: if msg.message_id.is_empty() {
-                None
-            } else {
-                Some(msg.message_id.clone())
-            },
-            content: error.to_string(),
+            reply_to: (!msg.message_id.is_empty()).then(|| msg.message_id.clone()),
+            content: content.into(),
         }
+    }
+
+    /// Creates an error reply targeting the same chat/channel as the inbound message.
+    pub fn error(msg: &InboundMessage, error: &str) -> Self {
+        Self::reply(msg, error)
     }
 }
 

@@ -55,17 +55,13 @@ impl CustomTool {
     }
 
     fn tokenize_argv(input: &str) -> Result<Vec<String>> {
+        if input.trim().is_empty() {
+            bail!("custom tool command is empty / 自定义工具命令为空");
+        }
+
         reject_unquoted_shell_metacharacters(input)?;
-        tokenize_quoted_args(input).map_err(|error| match error.to_string().as_str() {
-            "unclosed quote in command / 命令中有未闭合的引号" => {
-                anyhow::anyhow!(
-                    "unclosed quote in custom tool command / 自定义工具命令中有未闭合的引号"
-                )
-            }
-            "empty command / 空命令" => {
-                anyhow::anyhow!("custom tool command is empty / 自定义工具命令为空")
-            }
-            _ => error,
+        tokenize_quoted_args(input).map_err(|error| {
+            anyhow::anyhow!("invalid custom tool command / 自定义工具命令格式无效: {error}")
         })
     }
 
@@ -261,7 +257,26 @@ mod tests {
 
     #[test]
     fn test_tokenize_argv_rejects_shell_metacharacters() {
-        assert!(CustomTool::tokenize_argv("python script.py && whoami").is_err());
+        let error = CustomTool::tokenize_argv("python script.py && whoami")
+            .expect_err("shell metacharacters should be rejected / shell 元字符应被拒绝");
+        let message = error.to_string();
+        assert!(message.contains("shell metacharacters"));
+    }
+
+    #[test]
+    fn test_tokenize_argv_reports_empty_command() {
+        let error = CustomTool::tokenize_argv("   ")
+            .expect_err("whitespace-only command should fail / 仅空白命令应失败");
+        assert!(error.to_string().contains("custom tool command is empty"));
+    }
+
+    #[test]
+    fn test_tokenize_argv_wraps_unclosed_quote_error() {
+        let error = CustomTool::tokenize_argv("python \"unterminated")
+            .expect_err("unclosed quote should fail / 未闭合引号应失败");
+        let message = error.to_string();
+        assert!(message.contains("invalid custom tool command"));
+        assert!(message.contains("unclosed quote"));
     }
 
     #[test]

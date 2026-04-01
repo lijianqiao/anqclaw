@@ -99,6 +99,15 @@ impl AgentCore {
         )
     }
 
+    fn finish(
+        reply: OutboundMessage,
+        messages: &[ChatMessage],
+        persist_start: usize,
+    ) -> (OutboundMessage, Vec<ChatMessage>) {
+        let persist_messages = messages[persist_start..].to_vec();
+        (reply, persist_messages)
+    }
+
     pub async fn new(
         llm: Arc<dyn LlmClient>,
         fallback_llm: Option<Arc<dyn LlmClient>>,
@@ -301,18 +310,11 @@ impl AgentCore {
                     round,
                     "stream receiver closed before starting LLM round / 流接收端已关闭，跳过新的 LLM 轮次"
                 );
-                let reply = OutboundMessage {
-                    channel: msg.channel.clone(),
-                    chat_id: msg.chat_id.clone(),
-                    reply_to: if msg.message_id.is_empty() {
-                        None
-                    } else {
-                        Some(msg.message_id.clone())
-                    },
-                    content: String::new(),
-                };
-                let persist_messages = messages[persist_start..].to_vec();
-                return Ok((reply, persist_messages));
+                return Ok(Self::finish(
+                    OutboundMessage::reply(msg, String::new()),
+                    &messages,
+                    persist_start,
+                ));
             }
 
             let llm_start = std::time::Instant::now();
@@ -384,18 +386,11 @@ impl AgentCore {
                 }
                 if receiver_dropped {
                     if partial_text.is_empty() {
-                        let reply = OutboundMessage {
-                            channel: msg.channel.clone(),
-                            chat_id: msg.chat_id.clone(),
-                            reply_to: if msg.message_id.is_empty() {
-                                None
-                            } else {
-                                Some(msg.message_id.clone())
-                            },
-                            content: String::new(),
-                        };
-                        let persist_messages = messages[persist_start..].to_vec();
-                        return Ok((reply, persist_messages));
+                        return Ok(Self::finish(
+                            OutboundMessage::reply(msg, String::new()),
+                            &messages,
+                            persist_start,
+                        ));
                     }
                     crate::types::LlmResponse {
                         text: Some(partial_text),
@@ -449,18 +444,11 @@ impl AgentCore {
                 if !reply_text.is_empty() {
                     messages.push(ChatMessage::assistant(&reply_text));
                 }
-                let reply = OutboundMessage {
-                    channel: msg.channel.clone(),
-                    chat_id: msg.chat_id.clone(),
-                    reply_to: if msg.message_id.is_empty() {
-                        None
-                    } else {
-                        Some(msg.message_id.clone())
-                    },
-                    content: reply_text,
-                };
-                let persist_messages = messages[persist_start..].to_vec();
-                return Ok((reply, persist_messages));
+                return Ok(Self::finish(
+                    OutboundMessage::reply(msg, reply_text),
+                    &messages,
+                    persist_start,
+                ));
             }
 
             let has_tool_calls = !response.tool_calls.is_empty();
@@ -597,18 +585,11 @@ impl AgentCore {
                             "consecutive error protection triggered / 连续错误保护已触发"
                         );
 
-                        let reply = OutboundMessage {
-                            channel: msg.channel.clone(),
-                            chat_id: msg.chat_id.clone(),
-                            reply_to: if msg.message_id.is_empty() {
-                                None
-                            } else {
-                                Some(msg.message_id.clone())
-                            },
-                            content: failure_summary,
-                        };
-                        let persist_messages = messages[persist_start..].to_vec();
-                        return Ok((reply, persist_messages));
+                        return Ok(Self::finish(
+                            OutboundMessage::reply(msg, failure_summary),
+                            &messages,
+                            persist_start,
+                        ));
                     }
                 } else {
                     consecutive_errors = 0;
@@ -674,27 +655,21 @@ impl AgentCore {
 
                 messages.push(ChatMessage::assistant(&text));
 
-                let reply = OutboundMessage {
-                    channel: msg.channel.clone(),
-                    chat_id: msg.chat_id.clone(),
-                    reply_to: if msg.message_id.is_empty() {
-                        None
-                    } else {
-                        Some(msg.message_id.clone())
-                    },
-                    content: text,
-                };
-
-                let persist_messages = messages[persist_start..].to_vec();
-                return Ok((reply, persist_messages));
+                return Ok(Self::finish(
+                    OutboundMessage::reply(msg, text),
+                    &messages,
+                    persist_start,
+                ));
             } else {
                 // Empty response — treat as error
-                let reply = OutboundMessage::error(
-                    msg,
-                    "LLM returned an empty response / LLM 返回了空响应",
-                );
-                let persist_messages = messages[persist_start..].to_vec();
-                return Ok((reply, persist_messages));
+                return Ok(Self::finish(
+                    OutboundMessage::error(
+                        msg,
+                        "LLM returned an empty response / LLM 返回了空响应",
+                    ),
+                    &messages,
+                    persist_start,
+                ));
             }
         }
 
@@ -704,9 +679,11 @@ impl AgentCore {
         );
         messages.push(ChatMessage::assistant(&error_text));
 
-        let reply = OutboundMessage::error(msg, &error_text);
-        let persist_messages = messages[persist_start..].to_vec();
-        Ok((reply, persist_messages))
+        Ok(Self::finish(
+            OutboundMessage::error(msg, &error_text),
+            &messages,
+            persist_start,
+        ))
     }
 }
 
@@ -893,59 +870,151 @@ max_tool_rounds = 3
         ))
     }
 
+    fn mock_text_llm(text: &str) -> Arc<MockLlm> {
+        Arc::new(MockLlm::new(vec![LlmResponse {
+            text: Some(text.to_string()),
+            tool_calls: vec![],
+        }]))
+    }
+
+    struct TestDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(name);
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+
+        fn write(&self, relative: &str, content: &str) {
+            std::fs::write(self.path.join(relative), content).unwrap();
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    struct TestAgent {
+        agent: AgentCore,
+        mock_llm: Arc<MockLlm>,
+    }
+
+    impl TestAgent {
+        async fn new(mock_llm: Arc<MockLlm>) -> Self {
+            Self::with_config(mock_llm, test_config()).await
+        }
+
+        async fn with_config(mock_llm: Arc<MockLlm>, config: Arc<AppConfig>) -> Self {
+            Self::build(mock_llm, config, None).await
+        }
+
+        async fn with_workspace(mock_llm: Arc<MockLlm>, workspace: &std::path::Path) -> Self {
+            Self::with_config(mock_llm, test_config_with_workspace(workspace)).await
+        }
+
+        async fn with_skills(
+            mock_llm: Arc<MockLlm>,
+            config: Arc<AppConfig>,
+            skill_registry: Arc<SkillRegistry>,
+        ) -> Self {
+            Self::build(mock_llm, config, Some(skill_registry)).await
+        }
+
+        async fn with_workspace_and_skills(
+            mock_llm: Arc<MockLlm>,
+            workspace: &std::path::Path,
+            skill_registry: Arc<SkillRegistry>,
+        ) -> Self {
+            Self::with_skills(
+                mock_llm,
+                test_config_with_workspace(workspace),
+                skill_registry,
+            )
+            .await
+        }
+
+        async fn build(
+            mock_llm: Arc<MockLlm>,
+            config: Arc<AppConfig>,
+            skill_registry: Option<Arc<SkillRegistry>>,
+        ) -> Self {
+            let memory = test_memory().await;
+            let skill_settings = skill_registry.as_ref().map(|_| &config.skills);
+            let tools = Arc::new(ToolRegistry::new(
+                &config.tools,
+                &config.security,
+                &config.agent,
+                memory.clone(),
+                skill_registry.clone(),
+                vec![],
+                skill_settings,
+            ));
+            let agent = AgentCore::new(
+                mock_llm.clone(),
+                None,
+                tools,
+                memory,
+                config,
+                None,
+                skill_registry,
+            )
+            .await;
+
+            Self { agent, mock_llm }
+        }
+    }
+
     // ── Tests ────────────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_simple_text_response() {
-        let memory = test_memory().await;
-        let config = test_config();
+        let fixture = TestAgent::new(mock_text_llm("你好！有什么可以帮你的？")).await;
 
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("你好！有什么可以帮你的？".into()),
-            tool_calls: vec![],
-        }]));
-
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            None,
-            vec![],
-            None,
-        ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
-
-        let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
+        let msg = test_inbound();
+        let (reply, persist) = fixture.agent.handle(&msg, &[]).await;
 
         assert_eq!(reply.content, "你好！有什么可以帮你的？");
         assert_eq!(reply.channel, "test");
+        assert_eq!(reply.reply_to.as_deref(), Some(msg.message_id.as_str()));
         // persist should contain: user msg + assistant msg
         assert_eq!(persist.len(), 2);
     }
 
     #[tokio::test]
+    async fn test_simple_text_response_without_message_id_has_no_reply_to() {
+        let fixture = TestAgent::new(mock_text_llm("你好！有什么可以帮你的？")).await;
+
+        let mut msg = test_inbound();
+        msg.message_id.clear();
+        let (reply, persist) = fixture.agent.handle(&msg, &[]).await;
+
+        assert_eq!(reply.content, "你好！有什么可以帮你的？");
+        assert!(reply.reply_to.is_none());
+        assert_eq!(persist.len(), 2);
+    }
+
+    #[tokio::test]
     async fn test_streaming_returns_partial_text_without_done() {
-        let memory = test_memory().await;
-        let config = test_config();
-
-        let mock_llm = Arc::new(MockLlm::with_stream(vec![StreamEvent::Delta(
+        let fixture = TestAgent::new(Arc::new(MockLlm::with_stream(vec![StreamEvent::Delta(
             "处理中断前的部分回复".into(),
-        )]));
-
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            None,
-            vec![],
-            None,
-        ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+        )])))
+        .await;
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        let (reply, persist) = agent.handle_streaming(&test_inbound(), &[], tx).await;
+        let (reply, persist) = fixture
+            .agent
+            .handle_streaming(&test_inbound(), &[], tx)
+            .await;
 
         assert_eq!(reply.content, "处理中断前的部分回复");
         assert_eq!(rx.recv().await.as_deref(), Some("处理中断前的部分回复"));
@@ -954,36 +1023,16 @@ max_tool_rounds = 3
 
     #[tokio::test]
     async fn test_cached_workspace_extensions_reuses_recent_scan() {
-        let workspace = std::env::temp_dir().join("anqclaw_workspace_extension_cache_test");
-        let _ = std::fs::remove_dir_all(&workspace);
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(workspace.join("first.txt"), "hello").unwrap();
+        let workspace = TestDir::new("anqclaw_workspace_extension_cache_test");
+        workspace.write("first.txt", "hello");
+        let fixture = TestAgent::with_workspace(mock_text_llm("ok"), workspace.path()).await;
 
-        let memory = test_memory().await;
-        let config = test_config_with_workspace(&workspace);
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("ok".into()),
-            tool_calls: vec![],
-        }]));
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            None,
-            vec![],
-            None,
-        ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
-
-        let first = agent.cached_workspace_extensions().await;
-        std::fs::write(workspace.join("second.py"), "print('hi')").unwrap();
-        let second = agent.cached_workspace_extensions().await;
+        let first = fixture.agent.cached_workspace_extensions().await;
+        workspace.write("second.py", "print('hi')");
+        let second = fixture.agent.cached_workspace_extensions().await;
 
         assert!(first.contains(".txt"));
         assert_eq!(first, second);
-
-        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
@@ -1024,33 +1073,23 @@ max_tool_rounds = 3
 
     #[tokio::test]
     async fn test_streaming_stops_when_receiver_drops() {
-        let memory = test_memory().await;
-        let config = test_config();
-
-        let mock_llm = Arc::new(MockLlm::with_stream(vec![
+        let fixture = TestAgent::new(Arc::new(MockLlm::with_stream(vec![
             StreamEvent::Delta("第一段".into()),
             StreamEvent::Delta("第二段".into()),
             StreamEvent::Done(LlmResponse {
                 text: Some("完整回复".into()),
                 tool_calls: vec![],
             }),
-        ]));
-
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            None,
-            vec![],
-            None,
-        ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+        ])))
+        .await;
 
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         drop(rx);
 
-        let (reply, persist) = agent.handle_streaming(&test_inbound(), &[], tx).await;
+        let (reply, persist) = fixture
+            .agent
+            .handle_streaming(&test_inbound(), &[], tx)
+            .await;
 
         assert!(reply.content.is_empty());
         assert_eq!(persist.len(), 1);
@@ -1058,33 +1097,25 @@ max_tool_rounds = 3
 
     #[tokio::test]
     async fn test_streaming_skips_tool_execution_when_receiver_drops_before_done() {
-        let memory = test_memory().await;
-        let config = test_config();
-
-        let mock_llm = Arc::new(MockLlm::with_stream(vec![StreamEvent::Done(LlmResponse {
-            text: None,
-            tool_calls: vec![ToolCall {
-                id: "call_1".into(),
-                name: "shell_exec".into(),
-                arguments: serde_json::json!({"command": "date"}),
-            }],
-        })]));
-
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            None,
-            vec![],
-            None,
-        ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+        let fixture = TestAgent::new(Arc::new(MockLlm::with_stream(vec![StreamEvent::Done(
+            LlmResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "shell_exec".into(),
+                    arguments: serde_json::json!({"command": "date"}),
+                }],
+            },
+        )])))
+        .await;
 
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         drop(rx);
 
-        let (reply, persist) = agent.handle_streaming(&test_inbound(), &[], tx).await;
+        let (reply, persist) = fixture
+            .agent
+            .handle_streaming(&test_inbound(), &[], tx)
+            .await;
 
         assert!(reply.content.is_empty());
         assert_eq!(persist.len(), 1);
@@ -1092,10 +1123,7 @@ max_tool_rounds = 3
 
     #[tokio::test]
     async fn test_tool_call_loop() {
-        let memory = test_memory().await;
-        let config = test_config();
-
-        let mock_llm = Arc::new(MockLlm::new(vec![
+        let fixture = TestAgent::new(Arc::new(MockLlm::new(vec![
             // Round 1: LLM requests a tool call
             LlmResponse {
                 text: None,
@@ -1110,20 +1138,10 @@ max_tool_rounds = 3
                 text: Some("当前时间已获取。".into()),
                 tool_calls: vec![],
             },
-        ]));
+        ])))
+        .await;
 
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            None,
-            vec![],
-            None,
-        ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
-
-        let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
+        let (reply, persist) = fixture.agent.handle(&test_inbound(), &[]).await;
 
         assert_eq!(reply.content, "当前时间已获取。");
         // persist: user + assistant(tool_call) + tool_result + assistant(text)
@@ -1132,7 +1150,6 @@ max_tool_rounds = 3
 
     #[tokio::test]
     async fn test_max_rounds_exceeded() {
-        let memory = test_memory().await;
         let config = Arc::new(
             AppConfig::load_from_str(
                 r#"
@@ -1168,25 +1185,15 @@ max_consecutive_tool_errors = 10
             }],
         }]));
 
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            None,
-            vec![],
-            None,
-        ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+        let fixture = TestAgent::with_config(mock_llm, config).await;
 
-        let (reply, _persist) = agent.handle(&test_inbound(), &[]).await;
+        let (reply, _persist) = fixture.agent.handle(&test_inbound(), &[]).await;
 
         assert!(reply.content.contains("最大轮次限制"));
     }
 
     #[tokio::test]
     async fn test_consecutive_errors_triggers_stop() {
-        let memory = test_memory().await;
         let config = Arc::new(
             AppConfig::load_from_str(
                 r#"
@@ -1224,18 +1231,9 @@ max_tool_rounds = 10
             },
         ]));
 
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            None,
-            vec![],
-            None,
-        ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+        let fixture = TestAgent::with_config(mock_llm, config).await;
 
-        let (reply, persist) = agent.handle(&test_inbound(), &[]).await;
+        let (reply, persist) = fixture.agent.handle(&test_inbound(), &[]).await;
 
         assert!(reply.content.contains("多轮工具执行失败"));
         assert!(!reply.content.contains("最大轮次限制"));
@@ -1251,9 +1249,6 @@ max_tool_rounds = 10
 
     #[tokio::test]
     async fn test_consecutive_errors_resets_on_success() {
-        let memory = test_memory().await;
-        let config = test_config(); // max_tool_rounds = 3
-
         let mock_llm = Arc::new(MockLlm::new(vec![
             // Round 1: tool call that fails
             LlmResponse {
@@ -1280,18 +1275,9 @@ max_tool_rounds = 10
             },
         ]));
 
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            None,
-            vec![],
-            None,
-        ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
+        let fixture = TestAgent::new(mock_llm).await;
 
-        let (_reply, persist) = agent.handle(&test_inbound(), &[]).await;
+        let (_reply, persist) = fixture.agent.handle(&test_inbound(), &[]).await;
 
         // A success in round 2 should reset the counter, so no stop hint
         let has_stop_hint = persist
@@ -1305,43 +1291,19 @@ max_tool_rounds = 10
 
     #[tokio::test]
     async fn test_auto_activates_skill_from_recent_history() {
-        let memory = test_memory().await;
-        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_candidate_workspace");
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        let config = test_config_with_workspace(&workspace_dir);
-
-        let skill_dir = std::env::temp_dir().join("anqclaw_test_auto_activate_xlsx_skill");
+        let workspace_dir = TestDir::new("anqclaw_test_skill_candidate_workspace");
+        let skill_dir = TestDir::new("anqclaw_test_auto_activate_xlsx_skill");
         let skill_registry = create_skill_registry(
-            &skill_dir,
+            skill_dir.path(),
             &[(
                 "xlsx",
                 "---\nname: xlsx\ndescription: Spreadsheet skill\nextensions:\n  - .xlsx\nkeywords:\n  - spreadsheet\n---\nUse pandas for spreadsheet inspection.",
             )],
         );
-
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("已分析。".into()),
-            tool_calls: vec![],
-        }]));
-
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            Some(skill_registry.clone()),
-            vec![],
-            Some(&config.skills),
-        ));
-        let agent = AgentCore::new(
-            mock_llm.clone(),
-            None,
-            tools,
-            memory,
-            config,
-            None,
-            Some(skill_registry.clone()),
+        let fixture = TestAgent::with_workspace_and_skills(
+            mock_text_llm("已分析。"),
+            workspace_dir.path(),
+            skill_registry.clone(),
         )
         .await;
 
@@ -1356,16 +1318,17 @@ max_tool_rounds = 10
             ChatMessage::assistant("文件 设备数据导出.xlsx 在当前工作区未找到。"),
         ];
 
-        let candidates = agent
+        let candidates = fixture
+            .agent
             .select_skill_candidates(&msg.content.to_text(), &history)
             .await;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "xlsx");
 
-        let (reply, _persist) = agent.handle(&msg, &history).await;
+        let (reply, _persist) = fixture.agent.handle(&msg, &history).await;
 
         assert_eq!(reply.content, "已分析。");
-        let llm_messages = mock_llm.last_messages();
+        let llm_messages = fixture.mock_llm.last_messages();
         let expected_location = skill_registry.find("xlsx").unwrap().prompt_location();
         assert!(llm_messages.iter().any(|message| {
             message.role == crate::types::Role::System
@@ -1378,72 +1341,40 @@ max_tool_rounds = 10
                 .iter()
                 .any(|message| message.content.contains("# Activated Skill:"))
         );
-
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        let _ = std::fs::remove_dir_all(&skill_dir);
     }
 
     #[tokio::test]
     async fn test_select_skill_candidates_matches_standard_skill_description() {
-        let memory = test_memory().await;
-        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_description_workspace");
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        let config = test_config_with_workspace(&workspace_dir);
-
-        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_description_registry");
+        let workspace_dir = TestDir::new("anqclaw_test_skill_description_workspace");
+        let skill_dir = TestDir::new("anqclaw_test_skill_description_registry");
         let skill_registry = create_skill_registry(
-            &skill_dir,
+            skill_dir.path(),
             &[(
                 "xlsx",
                 "---\nname: xlsx\ndescription: Use this skill any time a spreadsheet file is the primary input or output. Trigger when users want to inspect, edit, or create Excel and tabular files.\n---\nBody",
             )],
         );
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("ok".into()),
-            tool_calls: vec![],
-        }]));
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            Some(skill_registry.clone()),
-            vec![],
-            Some(&config.skills),
-        ));
-        let agent = AgentCore::new(
-            mock_llm,
-            None,
-            tools,
-            memory,
-            config,
-            None,
-            Some(skill_registry),
+        let fixture = TestAgent::with_workspace_and_skills(
+            mock_text_llm("ok"),
+            workspace_dir.path(),
+            skill_registry,
         )
         .await;
 
-        let candidates = agent
+        let candidates = fixture
+            .agent
             .select_skill_candidates("Please inspect this spreadsheet for me", &[])
             .await;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "xlsx");
-
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        let _ = std::fs::remove_dir_all(&skill_dir);
     }
 
     #[tokio::test]
     async fn test_select_skill_candidates_prefers_keyword_match_over_trigger_match() {
-        let memory = test_memory().await;
-        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_keyword_workspace");
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        let config = test_config_with_workspace(&workspace_dir);
-
-        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_keyword_registry");
+        let workspace_dir = TestDir::new("anqclaw_test_skill_keyword_workspace");
+        let skill_dir = TestDir::new("anqclaw_test_skill_keyword_registry");
         let skill_registry = create_skill_registry(
-            &skill_dir,
+            skill_dir.path(),
             &[
                 (
                     "keyword-skill",
@@ -1455,52 +1386,28 @@ max_tool_rounds = 10
                 ),
             ],
         );
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("ok".into()),
-            tool_calls: vec![],
-        }]));
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            Some(skill_registry.clone()),
-            vec![],
-            Some(&config.skills),
-        ));
-        let agent = AgentCore::new(
-            mock_llm,
-            None,
-            tools,
-            memory,
-            config,
-            None,
-            Some(skill_registry),
+        let fixture = TestAgent::with_workspace_and_skills(
+            mock_text_llm("ok"),
+            workspace_dir.path(),
+            skill_registry,
         )
         .await;
 
-        let candidates = agent
+        let candidates = fixture
+            .agent
             .select_skill_candidates("Please inspect this spreadsheet / 请检查这个电子表格", &[])
             .await;
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].name, "keyword-skill");
         assert_eq!(candidates[1].name, "trigger-skill");
-
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        let _ = std::fs::remove_dir_all(&skill_dir);
     }
 
     #[tokio::test]
     async fn test_select_skill_candidates_prefers_higher_priority_when_scores_tie() {
-        let memory = test_memory().await;
-        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_priority_workspace");
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        let config = test_config_with_workspace(&workspace_dir);
-
-        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_priority_registry");
+        let workspace_dir = TestDir::new("anqclaw_test_skill_priority_workspace");
+        let skill_dir = TestDir::new("anqclaw_test_skill_priority_registry");
         let skill_registry = create_skill_registry(
-            &skill_dir,
+            skill_dir.path(),
             &[
                 (
                     "low-priority",
@@ -1512,52 +1419,28 @@ max_tool_rounds = 10
                 ),
             ],
         );
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("ok".into()),
-            tool_calls: vec![],
-        }]));
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            Some(skill_registry.clone()),
-            vec![],
-            Some(&config.skills),
-        ));
-        let agent = AgentCore::new(
-            mock_llm,
-            None,
-            tools,
-            memory,
-            config,
-            None,
-            Some(skill_registry),
+        let fixture = TestAgent::with_workspace_and_skills(
+            mock_text_llm("ok"),
+            workspace_dir.path(),
+            skill_registry,
         )
         .await;
 
-        let candidates = agent
+        let candidates = fixture
+            .agent
             .select_skill_candidates("Please inspect this spreadsheet / 请检查这个电子表格", &[])
             .await;
         assert_eq!(candidates[0].name, "high-priority");
         assert_eq!(candidates[1].name, "low-priority");
-
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        let _ = std::fs::remove_dir_all(&skill_dir);
     }
 
     #[tokio::test]
     async fn test_select_skill_candidates_prefers_extension_signal_over_generic_description() {
-        let memory = test_memory().await;
-        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_extension_workspace");
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        std::fs::write(workspace_dir.join("report.xlsx"), "fake").unwrap();
-        let config = test_config_with_workspace(&workspace_dir);
-
-        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_extension_registry");
+        let workspace_dir = TestDir::new("anqclaw_test_skill_extension_workspace");
+        workspace_dir.write("report.xlsx", "fake");
+        let skill_dir = TestDir::new("anqclaw_test_skill_extension_registry");
         let skill_registry = create_skill_registry(
-            &skill_dir,
+            skill_dir.path(),
             &[
                 (
                     "generic-description",
@@ -1569,31 +1452,15 @@ max_tool_rounds = 10
                 ),
             ],
         );
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("ok".into()),
-            tool_calls: vec![],
-        }]));
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            Some(skill_registry.clone()),
-            vec![],
-            Some(&config.skills),
-        ));
-        let agent = AgentCore::new(
-            mock_llm,
-            None,
-            tools,
-            memory,
-            config,
-            None,
-            Some(skill_registry),
+        let fixture = TestAgent::with_workspace_and_skills(
+            mock_text_llm("ok"),
+            workspace_dir.path(),
+            skill_registry,
         )
         .await;
 
-        let candidates = agent
+        let candidates = fixture
+            .agent
             .select_skill_candidates(
                 "Please inspect report.xlsx and help with this spreadsheet / 请检查 report.xlsx 并帮助处理这个电子表格",
                 &[],
@@ -1602,23 +1469,15 @@ max_tool_rounds = 10
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].name, "xlsx-skill");
         assert_eq!(candidates[1].name, "generic-description");
-
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        let _ = std::fs::remove_dir_all(&skill_dir);
     }
 
     #[tokio::test]
     async fn test_select_skill_candidates_caps_extension_content_signal() {
-        let memory = test_memory().await;
-        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_extension_cap_workspace");
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        std::fs::write(workspace_dir.join("report.xlsx"), "fake").unwrap();
-        let config = test_config_with_workspace(&workspace_dir);
-
-        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_extension_cap_registry");
+        let workspace_dir = TestDir::new("anqclaw_test_skill_extension_cap_workspace");
+        workspace_dir.write("report.xlsx", "fake");
+        let skill_dir = TestDir::new("anqclaw_test_skill_extension_cap_registry");
         let skill_registry = create_skill_registry(
-            &skill_dir,
+            skill_dir.path(),
             &[
                 (
                     "z-many-ext",
@@ -1630,132 +1489,68 @@ max_tool_rounds = 10
                 ),
             ],
         );
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("ok".into()),
-            tool_calls: vec![],
-        }]));
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            Some(skill_registry.clone()),
-            vec![],
-            Some(&config.skills),
-        ));
-        let agent = AgentCore::new(
-            mock_llm,
-            None,
-            tools,
-            memory,
-            config,
-            None,
-            Some(skill_registry),
+        let fixture = TestAgent::with_workspace_and_skills(
+            mock_text_llm("ok"),
+            workspace_dir.path(),
+            skill_registry,
         )
         .await;
 
-        let candidates = agent
+        let candidates = fixture
+            .agent
             .select_skill_candidates("Please inspect report.xlsx and help with this spreadsheet / 请检查 report.xlsx 并帮助处理这个电子表格", &[])
             .await;
 
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].name, "a-single-ext");
         assert_eq!(candidates[1].name, "z-many-ext");
-
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        let _ = std::fs::remove_dir_all(&skill_dir);
     }
 
     #[tokio::test]
     async fn test_select_skill_candidates_ignores_description_stopwords() {
-        let memory = test_memory().await;
-        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_stopwords_workspace");
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        let config = test_config_with_workspace(&workspace_dir);
-
-        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_stopwords_registry");
+        let workspace_dir = TestDir::new("anqclaw_test_skill_stopwords_workspace");
+        let skill_dir = TestDir::new("anqclaw_test_skill_stopwords_registry");
         let skill_registry = create_skill_registry(
-            &skill_dir,
+            skill_dir.path(),
             &[(
                 "generic-stopwords",
                 "---\nname: generic-stopwords\ndescription: the and with this input output\n---\nBody",
             )],
         );
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("ok".into()),
-            tool_calls: vec![],
-        }]));
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            Some(skill_registry.clone()),
-            vec![],
-            Some(&config.skills),
-        ));
-        let agent = AgentCore::new(
-            mock_llm,
-            None,
-            tools,
-            memory,
-            config,
-            None,
-            Some(skill_registry),
+        let fixture = TestAgent::with_workspace_and_skills(
+            mock_text_llm("ok"),
+            workspace_dir.path(),
+            skill_registry,
         )
         .await;
 
-        let candidates = agent
+        let candidates = fixture
+            .agent
             .select_skill_candidates("Please help me / 请帮助我", &[])
             .await;
         assert!(candidates.is_empty());
-
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        let _ = std::fs::remove_dir_all(&skill_dir);
     }
 
     #[tokio::test]
     async fn test_select_skill_candidates_matches_chinese_description_phrase() {
-        let memory = test_memory().await;
-        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_chinese_workspace");
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        let config = test_config_with_workspace(&workspace_dir);
-
-        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_chinese_registry");
+        let workspace_dir = TestDir::new("anqclaw_test_skill_chinese_workspace");
+        let skill_dir = TestDir::new("anqclaw_test_skill_chinese_registry");
         let skill_registry = create_skill_registry(
-            &skill_dir,
+            skill_dir.path(),
             &[(
                 "xlsx-cn",
                 "---\nname: xlsx-cn\ndescription: 处理电子表格文件\n---\nBody",
             )],
         );
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("ok".into()),
-            tool_calls: vec![],
-        }]));
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            Some(skill_registry.clone()),
-            vec![],
-            Some(&config.skills),
-        ));
-        let agent = AgentCore::new(
-            mock_llm,
-            None,
-            tools,
-            memory,
-            config,
-            None,
-            Some(skill_registry),
+        let fixture = TestAgent::with_workspace_and_skills(
+            mock_text_llm("ok"),
+            workspace_dir.path(),
+            skill_registry,
         )
         .await;
 
-        let candidates = agent
+        let candidates = fixture
+            .agent
             .select_skill_candidates(
                 "帮我处理这个电子表格 / Please help me with this spreadsheet",
                 &[],
@@ -1763,23 +1558,14 @@ max_tool_rounds = 10
             .await;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "xlsx-cn");
-
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        let _ = std::fs::remove_dir_all(&skill_dir);
     }
 
     #[tokio::test]
     async fn test_select_skill_candidates_description_does_not_beat_specific_keyword_match() {
-        let memory = test_memory().await;
-        let workspace_dir =
-            std::env::temp_dir().join("anqclaw_test_skill_description_weight_workspace");
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        let config = test_config_with_workspace(&workspace_dir);
-
-        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_description_weight_registry");
+        let workspace_dir = TestDir::new("anqclaw_test_skill_description_weight_workspace");
+        let skill_dir = TestDir::new("anqclaw_test_skill_description_weight_registry");
         let skill_registry = create_skill_registry(
-            &skill_dir,
+            skill_dir.path(),
             &[
                 (
                     "generic-description",
@@ -1791,53 +1577,29 @@ max_tool_rounds = 10
                 ),
             ],
         );
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("ok".into()),
-            tool_calls: vec![],
-        }]));
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            Some(skill_registry.clone()),
-            vec![],
-            Some(&config.skills),
-        ));
-        let agent = AgentCore::new(
-            mock_llm,
-            None,
-            tools,
-            memory,
-            config,
-            None,
-            Some(skill_registry),
+        let fixture = TestAgent::with_workspace_and_skills(
+            mock_text_llm("ok"),
+            workspace_dir.path(),
+            skill_registry,
         )
         .await;
 
-        let candidates = agent
+        let candidates = fixture
+            .agent
             .select_skill_candidates("Please inspect this spreadsheet / 请检查这个电子表格", &[])
             .await;
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].name, "keyword-skill");
         assert_eq!(candidates[1].name, "generic-description");
-
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        let _ = std::fs::remove_dir_all(&skill_dir);
     }
 
     #[tokio::test]
     async fn test_select_skill_candidates_ignores_disable_model_invocation() {
-        let memory = test_memory().await;
-        let workspace_dir = std::env::temp_dir().join("anqclaw_test_skill_hidden_workspace");
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        std::fs::write(workspace_dir.join("report.xlsx"), "fake").unwrap();
-        let config = test_config_with_workspace(&workspace_dir);
-
-        let skill_dir = std::env::temp_dir().join("anqclaw_test_skill_hidden_registry");
+        let workspace_dir = TestDir::new("anqclaw_test_skill_hidden_workspace");
+        workspace_dir.write("report.xlsx", "fake");
+        let skill_dir = TestDir::new("anqclaw_test_skill_hidden_registry");
         let skill_registry = create_skill_registry(
-            &skill_dir,
+            skill_dir.path(),
             &[
                 (
                     "hidden-xlsx",
@@ -1849,67 +1611,29 @@ max_tool_rounds = 10
                 ),
             ],
         );
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("ok".into()),
-            tool_calls: vec![],
-        }]));
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            Some(skill_registry.clone()),
-            vec![],
-            Some(&config.skills),
-        ));
-        let agent = AgentCore::new(
-            mock_llm,
-            None,
-            tools,
-            memory,
-            config,
-            None,
-            Some(skill_registry),
+        let fixture = TestAgent::with_workspace_and_skills(
+            mock_text_llm("ok"),
+            workspace_dir.path(),
+            skill_registry,
         )
         .await;
 
-        let candidates = agent.select_skill_candidates("请看下这个表格", &[]).await;
+        let candidates = fixture
+            .agent
+            .select_skill_candidates("请看下这个表格", &[])
+            .await;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "visible-xlsx");
-
-        let _ = std::fs::remove_dir_all(&workspace_dir);
-        let _ = std::fs::remove_dir_all(&skill_dir);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_cached_workspace_extensions_supports_current_thread_runtime() {
-        let workspace =
-            std::env::temp_dir().join("anqclaw_workspace_extension_cache_current_thread");
-        let _ = std::fs::remove_dir_all(&workspace);
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(workspace.join("first.txt"), "hello").unwrap();
+        let workspace = TestDir::new("anqclaw_workspace_extension_cache_current_thread");
+        workspace.write("first.txt", "hello");
+        let fixture = TestAgent::with_workspace(mock_text_llm("ok"), workspace.path()).await;
 
-        let memory = test_memory().await;
-        let config = test_config_with_workspace(&workspace);
-        let mock_llm = Arc::new(MockLlm::new(vec![LlmResponse {
-            text: Some("ok".into()),
-            tool_calls: vec![],
-        }]));
-        let tools = Arc::new(ToolRegistry::new(
-            &config.tools,
-            &config.security,
-            &config.agent,
-            memory.clone(),
-            None,
-            vec![],
-            None,
-        ));
-        let agent = AgentCore::new(mock_llm, None, tools, memory, config, None, None).await;
-
-        let extensions = agent.cached_workspace_extensions().await;
+        let extensions = fixture.agent.cached_workspace_extensions().await;
 
         assert!(extensions.contains(".txt"));
-
-        let _ = std::fs::remove_dir_all(&workspace);
     }
 }

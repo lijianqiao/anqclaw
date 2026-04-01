@@ -59,6 +59,14 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    fn register<T>(tools: &mut HashMap<String, Arc<dyn Tool>>, tool: T)
+    where
+        T: Tool + 'static,
+    {
+        let name = tool.name().to_string();
+        tools.insert(name, Arc::new(tool));
+    }
+
     /// Creates a registry and registers tools based on config toggles.
     pub fn new(
         config: &ToolsSection,
@@ -108,7 +116,7 @@ impl ToolRegistry {
                 venv_path,
                 Some(agent.managed_python_version.clone()),
             );
-            tools.insert(t.name().to_string(), Arc::new(t));
+            Self::register(&mut tools, t);
         }
 
         if config.web_fetch_enabled {
@@ -117,7 +125,7 @@ impl ToolRegistry {
                 config.web_fetch_max_bytes,
                 config.web_blocked_domains.clone(),
             );
-            tools.insert(t.name().to_string(), Arc::new(t));
+            Self::register(&mut tools, t);
         }
 
         if config.file_enabled {
@@ -131,16 +139,16 @@ impl ToolRegistry {
                 all_blocked_dirs.clone(),
                 security.trusted_dirs.clone(),
             );
-            tools.insert(read_tool.name().to_string(), Arc::new(read_tool));
-            tools.insert(write_tool.name().to_string(), Arc::new(write_tool));
+            Self::register(&mut tools, read_tool);
+            Self::register(&mut tools, write_tool);
         }
 
         if config.memory_tool_enabled {
             let save_tool = memory_tool::MemorySave::new(memory_store.clone());
             let search_tool =
                 memory_tool::MemorySearch::new(memory_store, config.memory_tool_search_limit);
-            tools.insert(save_tool.name().to_string(), Arc::new(save_tool));
-            tools.insert(search_tool.name().to_string(), Arc::new(search_tool));
+            Self::register(&mut tools, save_tool);
+            Self::register(&mut tools, search_tool);
         }
 
         // Register activate_skill tool if skills are available
@@ -149,12 +157,12 @@ impl ToolRegistry {
         {
             let max_active = skills_config.map(|s| s.max_active_skills).unwrap_or(3);
             let t = skill_tool::ActivateSkill::new(registry, max_active);
-            tools.insert(t.name().to_string(), Arc::new(t));
+            Self::register(&mut tools, t);
         }
         // Register switch_model tool if multiple LLM profiles are configured
         if llm_profile_names.len() > 1 {
             let t = model_tool::SwitchModel::new(llm_profile_names);
-            tools.insert(t.name().to_string(), Arc::new(t));
+            Self::register(&mut tools, t);
         }
         // Register custom tools from config
         for custom_config in &config.custom {
@@ -164,7 +172,7 @@ impl ToolRegistry {
                 all_blocked_dirs.clone(),
             ) {
                 Ok(t) => {
-                    tools.insert(t.name().to_string(), Arc::new(t));
+                    Self::register(&mut tools, t);
                 }
                 Err(error) => {
                     tracing::warn!(tool = custom_config.name.as_str(), error = %error, "skipping invalid custom tool configuration / 跳过无效的自定义工具配置");
@@ -180,7 +188,7 @@ impl ToolRegistry {
                 security.trusted_dirs.clone(),
                 config.pdf_read_max_chars,
             );
-            tools.insert(t.name().to_string(), Arc::new(t));
+            Self::register(&mut tools, t);
         }
 
         // Register image_info tool
@@ -190,7 +198,7 @@ impl ToolRegistry {
                 all_blocked_dirs.clone(),
                 security.trusted_dirs.clone(),
             );
-            tools.insert(t.name().to_string(), Arc::new(t));
+            Self::register(&mut tools, t);
         }
 
         tracing::info!(

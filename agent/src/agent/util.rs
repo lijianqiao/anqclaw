@@ -5,8 +5,17 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::skill_match::is_description_stopword;
+
+pub(crate) fn rwlock_read_or_recover<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|error| error.into_inner())
+}
+
+pub(crate) fn rwlock_write_or_recover<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|error| error.into_inner())
+}
 
 pub(crate) fn extract_file_like_tokens(text: &str) -> HashSet<String> {
     let mut current = String::new();

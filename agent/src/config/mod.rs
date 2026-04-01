@@ -182,11 +182,15 @@ pub struct AppConfig {
 
 // ─── Env-var resolution ───────────────────────────────────────────────────────
 
+fn resolve_env_ref(value: &str) -> Option<&str> {
+    value.strip_prefix("${").and_then(|s| s.strip_suffix('}'))
+}
+
 /// If `value` looks like `${VAR_NAME}`, read the environment variable `VAR_NAME`.
 /// Otherwise return the value unchanged.
 /// Returns an error if the referenced env var is not set.
 fn resolve_env(value: &str, field_name: &str) -> Result<String> {
-    if let Some(inner) = value.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+    if let Some(inner) = resolve_env_ref(value) {
         std::env::var(inner).with_context(|| {
             format!(
                 "Config field `{}` references env var `{}` which is not set / 配置字段 `{}` 引用的环境变量 `{}` 未设置",
@@ -204,7 +208,7 @@ fn resolve_env_optional(value: &str) -> String {
     if value.is_empty() {
         return String::new();
     }
-    if let Some(inner) = value.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+    if let Some(inner) = resolve_env_ref(value) {
         std::env::var(inner).unwrap_or_default()
     } else {
         value.to_string()
@@ -348,5 +352,42 @@ impl AppConfig {
                 .to_string_lossy()
                 .into_owned();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MISSING_ENV_VAR: &str = "ANQCLAW_TEST_MISSING_ENV_VAR_8F82E6A9";
+
+    #[test]
+    fn resolve_env_ref_extracts_wrapped_var_name() {
+        assert_eq!(resolve_env_ref("${TOKEN}"), Some("TOKEN"));
+        assert_eq!(resolve_env_ref("TOKEN"), None);
+        assert_eq!(resolve_env_ref("${TOKEN"), None);
+        assert_eq!(resolve_env_ref("$TOKEN}"), None);
+    }
+
+    #[test]
+    fn resolve_env_preserves_literal_values() {
+        assert_eq!(resolve_env("literal", "field").unwrap(), "literal");
+    }
+
+    #[test]
+    fn resolve_env_reports_missing_required_reference() {
+        let error = resolve_env(&format!("${{{MISSING_ENV_VAR}}}"), "feishu.app_secret")
+            .expect_err("missing env reference should fail / 缺失环境变量引用应失败");
+        let message = error.to_string();
+        assert!(message.contains("feishu.app_secret"));
+        assert!(message.contains(MISSING_ENV_VAR));
+    }
+
+    #[test]
+    fn resolve_env_optional_returns_empty_for_missing_reference() {
+        assert_eq!(
+            resolve_env_optional(&format!("${{{MISSING_ENV_VAR}}}")),
+            String::new()
+        );
     }
 }

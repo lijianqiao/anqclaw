@@ -11,7 +11,8 @@ use crate::skill::SkillMeta;
 use crate::types::ChatMessage;
 
 use super::util::{
-    collect_workspace_extensions, extract_description_terms, extract_file_like_tokens,
+    collect_workspace_extensions, extract_file_like_tokens, rwlock_read_or_recover,
+    rwlock_write_or_recover,
 };
 
 const RECENT_HISTORY_MESSAGE_LIMIT: usize = 8;
@@ -154,11 +155,13 @@ impl super::AgentCore {
     }
 
     pub(super) async fn cached_workspace_extensions(&self) -> HashSet<String> {
-        if let Ok(cache_guard) = self.workspace_extensions_cache.read()
-            && let Some(cache) = cache_guard.as_ref()
-            && cache.cached_at.elapsed() < super::WORKSPACE_EXTENSIONS_CACHE_TTL
         {
-            return cache.extensions.clone();
+            let cache_guard = rwlock_read_or_recover(&self.workspace_extensions_cache);
+            if let Some(cache) = cache_guard.as_ref()
+                && cache.cached_at.elapsed() < super::WORKSPACE_EXTENSIONS_CACHE_TTL
+            {
+                return cache.extensions.clone();
+            }
         }
 
         let workspace = self.config.app.workspace.clone();
@@ -192,14 +195,7 @@ impl super::AgentCore {
             extensions: extensions.clone(),
         };
 
-        match self.workspace_extensions_cache.write() {
-            Ok(mut cache_guard) => {
-                *cache_guard = Some(refreshed_cache);
-            }
-            Err(poisoned) => {
-                *poisoned.into_inner() = Some(refreshed_cache);
-            }
-        }
+        *rwlock_write_or_recover(&self.workspace_extensions_cache) = Some(refreshed_cache);
 
         extensions
     }
@@ -284,7 +280,7 @@ fn score_description_match(skill: &SkillMeta, context: &SkillCandidateContext) -
     if context.user_text.contains(description) {
         score += 50;
     } else {
-        let terms = extract_description_terms(description);
+        let terms = skill.description_terms();
         if terms.iter().any(|term| context.user_text.contains(term)) {
             score += 50;
         }

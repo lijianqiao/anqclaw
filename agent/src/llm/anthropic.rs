@@ -18,7 +18,7 @@ use std::time::Duration;
 use crate::config::LlmSection;
 use crate::types::{ChatMessage, LlmResponse, Role, StreamEvent, ToolCall, ToolDefinition};
 
-use super::LlmClient;
+use super::{LlmClient, StreamToolCallAccumulator, finalize_stream_response};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -97,6 +97,15 @@ impl AnthropicClient {
         }
     }
 
+    fn build_request(&self, body: &AntRequest<'_>) -> reqwest::RequestBuilder {
+        self.http
+            .post(ANTHROPIC_API_URL)
+            .header("x-api-key", self.api_key.expose_secret())
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .json(body)
+    }
+
     async fn do_chat(
         &self,
         messages: &[ChatMessage],
@@ -106,12 +115,7 @@ impl AnthropicClient {
 
         // Retry is handled by the outer RetryLlmClient — no internal retry here.
         let resp = self
-            .http
-            .post(ANTHROPIC_API_URL)
-            .header("x-api-key", self.api_key.expose_secret())
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .json(&body)
+            .build_request(&body)
             .send()
             .await
             .context("Anthropic HTTP request failed / Anthropic HTTP 请求失败")?;
@@ -137,15 +141,7 @@ impl AnthropicClient {
     ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
         let body = self.build_request_body(messages, tools, true);
 
-        let resp = self
-            .http
-            .post(ANTHROPIC_API_URL)
-            .header("x-api-key", self.api_key.expose_secret())
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        let resp = self.build_request(&body).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -160,8 +156,7 @@ impl AnthropicClient {
         tokio::spawn(async move {
             let mut buffer = Vec::new();
             let mut full_text = String::new();
-            let mut tc_acc: std::collections::HashMap<usize, (String, String, String)> =
-                std::collections::HashMap::new();
+            let mut tc_acc = StreamToolCallAccumulator::new();
             let mut response = resp;
             let mut done = false;
             const MAX_BUFFER_SIZE: usize = 512 * 1024; // 512 KB safety limit
@@ -248,31 +243,7 @@ impl AnthropicClient {
                 }
             }
 
-            // Build tool calls
-            let mut tool_calls = Vec::new();
-            let mut keys: Vec<usize> = tc_acc.keys().copied().collect();
-            keys.sort();
-            for k in keys {
-                let (id, name, args) = match tc_acc.remove(&k) {
-                    Some(v) => v,
-                    None => continue,
-                };
-                let arguments = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
-                tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments,
-                });
-            }
-
-            let resp = LlmResponse {
-                text: if full_text.is_empty() {
-                    None
-                } else {
-                    Some(full_text)
-                },
-                tool_calls,
-            };
+            let resp = finalize_stream_response(full_text, tc_acc);
             let _ = tx.send(StreamEvent::Done(resp)).await;
         });
 
@@ -545,7 +516,9 @@ fn parse_ant_response(resp: AntResponse) -> Result<LlmResponse> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnthropicClient, EMPTY_USER_INPUT_PLACEHOLDER, drain_complete_sse_lines};
+    use super::{
+        ANTHROPIC_VERSION, AnthropicClient, EMPTY_USER_INPUT_PLACEHOLDER, drain_complete_sse_lines,
+    };
     use crate::types::ChatMessage;
     use secrecy::SecretString;
 
@@ -605,6 +578,39 @@ mod tests {
                 panic!("expected user text message / 预期用户文本消息")
             }
         }
+    }
+
+    #[test]
+    fn build_request_sets_required_headers() {
+        let client = test_client();
+        let messages = vec![ChatMessage::user("hello")];
+        let body = client.build_request_body(&messages, &[], false);
+        let request = client
+            .build_request(&body)
+            .build()
+            .expect("request should build / 请求应可构建");
+
+        assert_eq!(
+            request
+                .headers()
+                .get("x-api-key")
+                .and_then(|v| v.to_str().ok()),
+            Some("test-key")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("anthropic-version")
+                .and_then(|v| v.to_str().ok()),
+            Some(ANTHROPIC_VERSION)
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
     }
 
     #[test]

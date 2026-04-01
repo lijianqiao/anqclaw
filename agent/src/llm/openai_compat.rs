@@ -16,7 +16,7 @@ use std::time::Duration;
 use crate::config::LlmSection;
 use crate::types::{ChatMessage, LlmResponse, Role, StreamEvent, ToolCall, ToolDefinition};
 
-use super::LlmClient;
+use super::{LlmClient, StreamToolCallAccumulator, finalize_stream_response};
 
 // ─── Client ──────────────────────────────────────────────────────────────────
 
@@ -151,8 +151,7 @@ impl OpenAiCompatClient {
         tokio::spawn(async move {
             let mut buffer = String::new();
             let mut full_text = String::new();
-            let mut tc_acc: std::collections::HashMap<usize, (String, String, String)> =
-                std::collections::HashMap::new();
+            let mut tc_acc = StreamToolCallAccumulator::new();
             let mut response = response;
             let mut done = false;
             const MAX_BUFFER_SIZE: usize = 512 * 1024; // 512 KB safety limit
@@ -217,31 +216,7 @@ impl OpenAiCompatClient {
                 }
             }
 
-            // Build tool calls from accumulated data
-            let mut tool_calls = Vec::new();
-            let mut keys: Vec<usize> = tc_acc.keys().copied().collect();
-            keys.sort();
-            for k in keys {
-                let (id, name, args) = match tc_acc.remove(&k) {
-                    Some(v) => v,
-                    None => continue,
-                };
-                let arguments = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
-                tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments,
-                });
-            }
-
-            let resp = LlmResponse {
-                text: if full_text.is_empty() {
-                    None
-                } else {
-                    Some(full_text)
-                },
-                tool_calls,
-            };
+            let resp = finalize_stream_response(full_text, tc_acc);
             let _ = tx.send(StreamEvent::Done(resp)).await;
         });
 
@@ -566,6 +541,7 @@ struct OaiStreamFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::{StreamToolCallAccumulator, finalize_stream_response};
 
     #[test]
     fn test_build_endpoint_plain_domain() {
@@ -648,5 +624,29 @@ mod tests {
     #[test]
     fn test_provider_extra_headers_other_provider_empty() {
         assert!(provider_extra_headers("openai").is_empty());
+    }
+
+    #[test]
+    fn test_finalize_stream_response_orders_tool_calls_and_nulls_invalid_json() {
+        let mut tc_acc = StreamToolCallAccumulator::new();
+        tc_acc.insert(2, ("call_2".into(), "second".into(), "{invalid".into()));
+        tc_acc.insert(
+            0,
+            ("call_0".into(), "first".into(), r#"{"ok":true}"#.into()),
+        );
+
+        let response = finalize_stream_response("hello".into(), tc_acc);
+
+        assert_eq!(response.text.as_deref(), Some("hello"));
+        assert_eq!(response.tool_calls.len(), 2);
+        assert_eq!(response.tool_calls[0].id, "call_0");
+        assert_eq!(response.tool_calls[0].name, "first");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::json!({"ok": true})
+        );
+        assert_eq!(response.tool_calls[1].id, "call_2");
+        assert_eq!(response.tool_calls[1].name, "second");
+        assert_eq!(response.tool_calls[1].arguments, serde_json::Value::Null);
     }
 }
