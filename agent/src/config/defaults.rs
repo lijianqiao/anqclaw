@@ -66,7 +66,6 @@ pub(crate) fn default_shell_allowed_commands() -> Vec<String> {
         "ls".to_string(),
         "cat".to_string(),
         "grep".to_string(),
-        "find".to_string(),
         "date".to_string(),
         "curl".to_string(),
     ]

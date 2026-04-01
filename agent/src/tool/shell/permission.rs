@@ -3,11 +3,13 @@
 //! @since <2026-03-31>
 //! @brief 负责 shell_exec 的权限级别与命令链切分规则。
 
+#[cfg(target_os = "windows")]
+const WINDOWS_SHELL_BUILTINS: &[&str] = &["echo", "dir", "type", "cd", "set"];
+
 /// Built-in readonly commands — safe to run in any mode.
 pub(crate) const READONLY_COMMANDS: &[&str] = &[
-    "ls", "dir", "cat", "head", "tail", "grep", "find", "date", "whoami", "pwd", "wc", "sort",
-    "uniq", "echo", "file", "stat", "type", "where", "hostname", "uname", "df", "du", "env",
-    "printenv", "which",
+    "ls", "dir", "cat", "head", "tail", "grep", "date", "whoami", "pwd", "wc", "sort", "uniq",
+    "echo", "file", "stat", "type", "where", "hostname", "uname", "df", "du", "printenv", "which",
 ];
 
 /// Commands that are ALWAYS blocked regardless of permission level.
@@ -23,7 +25,18 @@ pub(crate) const ALWAYS_BLOCKED: &[&str] = &[
     "poweroff",
 ];
 
-pub(crate) const MANAGED_RUNTIME_COMMANDS: &[&str] = &["python", "python3", "pip", "pip3", "uv"];
+pub(crate) fn is_shell_builtin(command: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        WINDOWS_SHELL_BUILTINS.contains(&command)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = command;
+        false
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PermissionLevel {

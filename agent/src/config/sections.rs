@@ -333,16 +333,23 @@ pub struct AgentSection {
     /// Fallback LLM profile name. Empty = no fallback.
     #[serde(default = "default_fallback_profile")]
     pub fallback_profile: String,
-    /// Allow LLM to install packages autonomously. Default: false.
+    /// Allow LLM to install packages autonomously. When `install_scope = "venv"`,
+    /// shell_exec may prepare a workspace-local managed runtime and install
+    /// packages automatically. This does not require a preinstalled system
+    /// Python, but it does require a locally available `uv`. Default: false.
     #[serde(default)]
     pub auto_install_packages: bool,
     /// Install isolation: "venv" | "user" | "system". Default: "venv".
     #[serde(default = "default_install_scope")]
     pub install_scope: String,
-    /// Virtual environment path (relative to ~/.anqclaw/). Default: "workspace/.venv".
+    /// Virtual environment path (relative to ~/.anqclaw/). Created on first
+    /// Python-oriented task when local `uv` is available; the requested Python
+    /// version may be installed on demand into this managed environment.
+    /// Default: "workspace/.venv".
     #[serde(default = "default_venv_path")]
     pub venv_path: String,
-    /// Managed Python version used when bootstrapping an isolated runtime.
+    /// Managed Python version requested when bootstrapping the workspace-local
+    /// isolated runtime with `uv`.
     #[serde(default = "default_managed_python_version")]
     pub managed_python_version: String,
     /// Max consecutive all-failed tool rounds before forcing stop. Default: 3.

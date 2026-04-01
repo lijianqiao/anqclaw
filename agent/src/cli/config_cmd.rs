@@ -294,7 +294,7 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
             {
                 let venv = resolve_path(&home, &config.agent.venv_path);
                 println!(
-                    "✓ Managed Python bootstrap enabled: {} (target Python {}) / 托管 Python 自举已启用: {}（目标版本 {}）",
+                    "✓ Managed Python venv policy enabled: {} (target Python {}, local uv required) / 托管 Python venv 策略已启用: {}（目标版本 {}，要求本地 uv）",
                     venv.display(),
                     config.agent.managed_python_version,
                     venv.display(),
@@ -308,13 +308,13 @@ pub fn run_validate(cli_config: Option<&str>) -> anyhow::Result<()> {
                     );
                 } else {
                     println!(
-                        "ℹ Managed venv not created yet: {} (will bootstrap on first Python task) / 托管虚拟环境尚未创建: {}（首次 Python 任务时将自动自举）",
+                        "ℹ Managed venv not created yet: {} (first Python task will create it only after local uv is available) / 托管虚拟环境尚未创建: {}（首次 Python 任务仅会在本地 uv 可用时创建）",
                         venv.display(),
                         venv.display()
                     );
                 }
             } else {
-                println!("ℹ Managed Python bootstrap is disabled / 托管 Python 自举已禁用");
+                println!("ℹ Managed Python venv policy is disabled / 托管 Python venv 策略已禁用");
             }
 
             // 8. Check application log file path

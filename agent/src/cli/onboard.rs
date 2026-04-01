@@ -261,17 +261,20 @@ fn generate_config(
 
     s.push_str("[tools]\n");
     s.push_str("shell_enabled = true\n");
+    s.push_str("# readonly=仅内置只读命令；supervised=按 shell_allowed_commands|shell_extra_allowed 放行；full=忽略 shell_allowed_commands|shell_extra_allowed，仅保留 blocked/危险模式/路径围栏\n");
     s.push_str("shell_permission_level = \"supervised\"\n");
     s.push_str("shell_timeout_secs = 30\n");
     s.push_str("file_access_dir = \"workspace\"\n");
     s.push('\n');
     s.push_str("# supervised 模式下允许执行的命令（基础白名单）\n");
     s.push_str("# 网络访问默认统一收敛到 web_fetch，而不是直接开放 curl/wget\n");
-    s.push_str("shell_allowed_commands = [\"ls\", \"cat\", \"grep\", \"find\", \"date\"]\n");
+    s.push_str("# 注意：shell_allowed_commands|shell_extra_allowed 只按首 token 匹配；写 \"powershell -Command\" 这类整条模板不会按预期生效\n");
+    s.push_str("shell_allowed_commands = [\"ls\", \"cat\", \"grep\", \"date\"]\n");
     s.push_str("# 额外允许的命令（追加到上面的白名单之后）\n");
-    s.push_str("# Python 运行时命令默认放开，配合 auto_install_packages 可自动自举工作区 .venv\n");
-    s.push_str("shell_extra_allowed = [\"python\", \"python3\", \"pip\", \"pip3\", \"uv\"]\n");
-    s.push_str("# 即使在 full 模式也始终禁止的命令\n");
+    s.push_str("# Python 运行时命令会按托管规则单独校验；这里只保留非托管场景下需要的附加命令\n");
+    s.push_str("# 如果在 supervised 中放开 powershell/pwsh/sh/bash/cmd 等解释器，风险会显著上升，实际效果接近高权限模式\n");
+    s.push_str("shell_extra_allowed = [\"python\", \"python3\", \"pip\", \"pip3\"]\n");
+    s.push_str("# 这些命令在 readonly / supervised / full 三种模式下都会被阻止\n");
     s.push_str("shell_blocked_commands = [\"rm -rf /\", \"mkfs\", \"dd\", \"format\", \"shutdown\", \"reboot\"]\n");
     s.push('\n');
     s.push_str("web_fetch_enabled = true\n");
@@ -303,7 +306,9 @@ fn generate_config(
     s.push_str("llm_profile = \"default\"\n");
     s.push_str("# fallback_profile = \"deepseek\"  # 主模型失败时的备选\n");
     s.push_str("# system_prompt_file = \"\"  # 自定义 system prompt 文件路径\n");
-    s.push_str("auto_install_packages = true  # 允许 LLM 自动安装依赖包\n");
+    s.push_str(
+        "auto_install_packages = true  # 允许 LLM 自动安装依赖包；venv 模式要求本地已安装 uv\n",
+    );
     s.push_str("install_scope = \"venv\"  # 安装隔离: venv | user | system\n");
     s.push_str("venv_path = \"workspace/.venv\"\n");
     s.push_str("managed_python_version = \"3.12\"\n\n");

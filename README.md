@@ -2,7 +2,7 @@
 
 [中文版本](README_zh.md)
 
-anqclaw is a personal AI assistant built in Rust. It currently supports Feishu, HTTP, and CLI entry points, with multi-LLM collaboration, tool calling, persistent memory, and runtime bootstrapping for real-world tasks.
+anqclaw is a personal AI assistant built in Rust. It currently supports Feishu, HTTP, and CLI entry points, with multi-LLM collaboration, tool calling, persistent memory, and managed runtime support for real-world tasks.
 
 ## Current Capabilities
 
@@ -12,7 +12,7 @@ anqclaw is a personal AI assistant built in Rust. It currently supports Feishu, 
 - Skills mainline: candidate skills are exposed as structured `<available_skills>`, and the model reads `SKILL.md` on demand
 - Built-in tools: shell, web, file, memory, pdf_read, image_info, and custom tools
 - SQLite conversation history and long-term memory, with a source table plus FTS5 index mirror
-- Python task bootstrap: prepares a workspace `.venv` and runs scripts when needed
+- Managed Python tasks: can prepare a workspace `.venv` and run scripts when needed when local `uv` is already installed
 - Default safety controls: supervised shell, file sandboxing, SSRF checks, and audit logging
 
 ## Architecture Overview
@@ -78,7 +78,8 @@ C:\anqclaw\anqclaw.exe serve
 As needed:
 
 - Install Microsoft Visual C++ Redistributable
-- Install Python or `uv` if you enable Python bootstrap or package installation flows
+- Preinstall `uv` if you enable managed Python package installation with `install_scope = "venv"`; anqclaw will not download it automatically
+- Install Python/pip yourself when your prompts or custom tools rely on a non-managed interpreter
 - Install any external commands required by your prompts or custom tools
 
 ### Linux
@@ -114,7 +115,8 @@ Without `PATH`:
 
 As needed:
 
-- Install Python or `uv` if you enable Python bootstrap or package installation flows
+- Preinstall `uv` if you enable managed Python package installation with `install_scope = "venv"`; anqclaw will not download it automatically
+- Install Python/pip yourself when your prompts or custom tools rely on a non-managed interpreter
 - Install any external commands required by your prompts or custom tools
 
 ### macOS
@@ -151,7 +153,8 @@ Without `PATH`:
 As needed:
 
 - If the first launch is blocked, run `xattr -d com.apple.quarantine /usr/local/anqclaw/anqclaw`
-- Install Python or `uv` if you enable Python bootstrap or package installation flows
+- Preinstall `uv` if you enable managed Python package installation with `install_scope = "venv"`; anqclaw will not download it automatically
+- Install Python/pip yourself when your prompts or custom tools rely on a non-managed interpreter
 - Install any external commands required by your prompts or custom tools
 
 ## Development

@@ -173,10 +173,91 @@ fn normalize_tool_path(user_path: &str) -> String {
 
 // ─── Blocked directory check ─────────────────────────────────────────────────
 
+fn normalize_match_component(component: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        component.to_lowercase()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        component.to_string()
+    }
+}
+
+fn path_components_for_match(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| normalize_match_component(&component.as_os_str().to_string_lossy()))
+        .collect()
+}
+
+fn component_slices_match(path_components: &[String], blocked_components: &[String]) -> bool {
+    path_components
+        .iter()
+        .zip(blocked_components.iter())
+        .all(|(left, right)| left == right)
+}
+
+fn path_has_prefix_components(path_components: &[String], blocked_components: &[String]) -> bool {
+    blocked_components.len() <= path_components.len()
+        && component_slices_match(
+            &path_components[..blocked_components.len()],
+            blocked_components,
+        )
+}
+
+fn path_has_component_sequence(path_components: &[String], blocked_components: &[String]) -> bool {
+    if blocked_components.is_empty() || blocked_components.len() > path_components.len() {
+        return false;
+    }
+
+    path_components
+        .windows(blocked_components.len())
+        .any(|window| component_slices_match(window, blocked_components))
+}
+
+fn is_absolute_like_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    Path::new(path).is_absolute()
+        || Path::new(path).has_root()
+        || path.starts_with("\\\\")
+        || matches!(bytes.get(1), Some(b':'))
+}
+
+fn blocked_path_matches(candidate: &Path, blocked_spec: &str) -> bool {
+    let candidate_compare = crate::paths::canonicalize_for_comparison(candidate)
+        .unwrap_or_else(|_| candidate.to_path_buf());
+    let candidate_components = path_components_for_match(&candidate_compare);
+
+    if is_absolute_like_path(blocked_spec) {
+        let blocked_path = Path::new(blocked_spec);
+        let blocked_compare = crate::paths::canonicalize_for_comparison(blocked_path)
+            .unwrap_or_else(|_| blocked_path.to_path_buf());
+        let blocked_components = path_components_for_match(&blocked_compare);
+        if blocked_components.is_empty() {
+            return false;
+        }
+
+        let blocked_is_dir = blocked_spec.ends_with('/')
+            || blocked_spec.ends_with('\\')
+            || blocked_compare
+                .metadata()
+                .map(|meta| meta.is_dir())
+                .unwrap_or(true);
+        if blocked_is_dir {
+            path_has_prefix_components(&candidate_components, &blocked_components)
+        } else {
+            candidate_components == blocked_components
+        }
+    } else {
+        let blocked_components = path_components_for_match(Path::new(blocked_spec));
+        path_has_component_sequence(&candidate_components, &blocked_components)
+    }
+}
+
 fn check_blocked_dirs(path: &Path, blocked_dirs: &[String]) -> Result<()> {
-    let path_str = path.to_string_lossy();
     for dir in blocked_dirs {
-        if path_str.contains(dir.as_str()) {
+        if blocked_path_matches(path, dir) {
             bail!(
                 "path `{}` references blocked directory: {} / 路径 `{}` 引用了被屏蔽的目录: {}",
                 path.display(),
@@ -534,6 +615,31 @@ mod tests {
         let blocked = vec![".ssh".to_string()];
         let result = check_blocked_dirs(path, &blocked);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_blocked_dirs_requires_component_boundary() {
+        let path = Path::new("/home/user/.ssh_backup/id_rsa");
+        let blocked = vec![".ssh".to_string()];
+        let result = check_blocked_dirs(path, &blocked);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_blocked_dirs_matches_component_sequence() {
+        let path = Path::new("/home/user/.config/gcloud/credentials.db");
+        let blocked = vec![".config/gcloud".to_string()];
+        let result = check_blocked_dirs(path, &blocked);
+        assert!(result.is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_check_blocked_dirs_windows_is_case_insensitive() {
+        let path = Path::new(r"C:\Users\alice\.SSH\id_rsa");
+        let blocked = vec![".ssh".to_string()];
+        let result = check_blocked_dirs(path, &blocked);
+        assert!(result.is_err());
     }
 
     #[tokio::test]

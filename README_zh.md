@@ -2,7 +2,7 @@
 
 [English Version](README.md)
 
-anqclaw 是一个用 Rust 构建的私人 AI 助理，当前支持飞书、HTTP 和 CLI 三种接入方式，具备多 LLM 协作、工具调用、持久记忆，以及面向真实任务的运行时自举能力。
+anqclaw 是一个用 Rust 构建的私人 AI 助理，当前支持飞书、HTTP 和 CLI 三种接入方式，具备多 LLM 协作、工具调用、持久记忆，以及面向真实任务的托管运行时能力。
 
 ## 当前能力
 
@@ -12,7 +12,7 @@ anqclaw 是一个用 Rust 构建的私人 AI 助理，当前支持飞书、HTTP 
 - Skills 主链：候选 skill 以结构化 `<available_skills>` 暴露，模型按需读取 `SKILL.md`
 - 内置工具：shell、web、file、memory、pdf_read、image_info、custom tool
 - SQLite 对话历史与长期记忆，长期记忆采用 source table + FTS5 索引镜像
-- Python 任务自举：支持在工作区自动准备 `.venv` 并执行脚本
+- 托管 Python 任务：在本地已安装 `uv` 时，可按需准备工作区 `.venv` 并执行脚本
 - 默认安全收敛：受控 shell、文件沙箱、SSRF 校验、审计日志
 
 ## 架构概览
@@ -78,7 +78,8 @@ C:\anqclaw\anqclaw.exe serve
 按需：
 
 - 安装 Microsoft Visual C++ Redistributable
-- 如果启用 Python 自举或自动装包，安装 Python 或 `uv`
+- 如果启用托管 Python 装包且 `install_scope = "venv"`，请预先安装 `uv`；anqclaw 不会自动下载它
+- 如果 prompt 或 custom tool 依赖非托管解释器，请自行安装 Python/pip
 - 如果 prompt 或 custom tool 依赖外部命令，安装对应命令
 
 ### Linux
@@ -114,7 +115,8 @@ anqclaw serve
 
 按需：
 
-- 如果启用 Python 自举或自动装包，安装 Python 或 `uv`
+- 如果启用托管 Python 装包且 `install_scope = "venv"`，请预先安装 `uv`；anqclaw 不会自动下载它
+- 如果 prompt 或 custom tool 依赖非托管解释器，请自行安装 Python/pip
 - 如果 prompt 或 custom tool 依赖外部命令，安装对应命令
 
 ### macOS
@@ -151,7 +153,8 @@ anqclaw serve
 按需：
 
 - 首次运行如被系统阻止，执行 `xattr -d com.apple.quarantine /usr/local/anqclaw/anqclaw`
-- 如果启用 Python 自举或自动装包，安装 Python 或 `uv`
+- 如果启用托管 Python 装包且 `install_scope = "venv"`，请预先安装 `uv`；anqclaw 不会自动下载它
+- 如果 prompt 或 custom tool 依赖非托管解释器，请自行安装 Python/pip
 - 如果 prompt 或 custom tool 依赖外部命令，安装对应命令
 
 ## 开发

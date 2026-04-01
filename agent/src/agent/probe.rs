@@ -136,11 +136,11 @@ impl EnvironmentProbe {
             s +=
                 "- If a package is missing, install it first (prefer uv if available, else pip).\n";
         } else if managed_bootstrap {
-            s += "- A managed Python runtime can be bootstrapped automatically for shell_exec tasks.\n";
+            s += "- A managed Python runtime can be prepared for shell_exec tasks when local uv is already installed.\n";
             s += "- For data processing (xlsx, csv, docx), write Python scripts and execute via shell_exec.\n";
             s += "- Store generated scripts under `script/` in the workspace root, not under `workspace/`.\n";
-            s += "- Do NOT trigger managed runtime bootstrap until the required input files have been confirmed to exist.\n";
-            s += "- If Python, pip, or uv is missing, shell_exec may prepare the isolated runtime automatically.\n";
+            s += "- Do NOT trigger managed runtime preparation until the required input files have been confirmed to exist.\n";
+            s += "- If uv is missing, stop and ask the user to install uv manually; shell_exec will not download it automatically.\n";
         } else if has_python && !has_pip {
             s += "- Python is available but pip is NOT. You can run scripts with stdlib only.\n";
             s += "- If packages are needed, inform the user to install pip first.\n";
@@ -153,7 +153,7 @@ impl EnvironmentProbe {
             s += "- uv is available. Prefer `uv pip install` over `pip install` for speed.\n";
             s += "- Use `uv venv` for isolated environments when installing packages.\n";
         } else if managed_bootstrap {
-            s += "- uv is not currently available, but the managed runtime bootstrapper may install it automatically.\n";
+            s += "- uv is not currently available. Tell the user to install uv manually before relying on the managed runtime.\n";
         }
 
         // Package installation policy
@@ -163,7 +163,7 @@ impl EnvironmentProbe {
             if agent_config.install_scope == "venv" {
                 let venv = &agent_config.venv_path;
                 s += &format!("- ALWAYS use a virtual environment at `{venv}`.\n");
-                s += "- shell_exec will prepare the environment automatically before Python-oriented commands when possible.\n";
+                s += "- shell_exec can prepare that environment automatically after local uv is already available.\n";
                 s += &format!(
                     "- Managed Python target version: `{}`.\n",
                     agent_config.managed_python_version
@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_prompt_section_bootstraps_when_python_missing() {
+    fn test_to_prompt_section_requires_manual_uv_when_python_missing() {
         let probe = make_probe(&[
             ("python3", false, None),
             ("python", false, None),
@@ -384,9 +384,11 @@ mod tests {
         config.auto_install_packages = true;
         config.install_scope = "venv".to_string();
         let section = probe.to_prompt_section(&config);
-        assert!(section.contains("bootstrapped automatically"));
-        assert!(section.contains("shell_exec may prepare the isolated runtime automatically"));
-        assert!(section.contains("Do NOT trigger managed runtime bootstrap until the required input files have been confirmed to exist"));
+        assert!(
+            section.contains("prepared for shell_exec tasks when local uv is already installed")
+        );
+        assert!(section.contains("install uv manually"));
+        assert!(section.contains("Do NOT trigger managed runtime preparation until the required input files have been confirmed to exist"));
     }
 
     #[test]
